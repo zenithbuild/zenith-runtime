@@ -1,1 +1,21 @@
-# zenith-runtime
+# @zenith/runtime
+
+The core runtime library for the Zenith framework.
+
+## Overview
+This package provides the reactivity system, hydration logic, and Virtual DOM primitives used by Zenith applications. It is designed to be lightweight, fast, and tree-shakeable.
+
+## Features
+- **Fine-Grained Reactivity**: Signals, Effects, Derived State (Memos).
+- **Hydration**: Efficient client-side hydration of server-rendered HTML.
+- **VDOM primitives**: `h` and `fragment` for lightweight view rendering.
+- **Lifecycle Hooks**: `onMount`, `onUnmount`.
+
+## Usage
+This package is typically installed automatically by the Zenith CLI.
+```typescript
+import { signal, effect } from "@zenith/runtime";
+
+const count = signal(0);
+effect(() => console.log(count()));
+```
