@@ -1,6 +1,18 @@
 // Zenith Runtime
 // Ported from hydration_runtime.js
 
+// Exported Types
+export type Signal<T> = ((v?: T) => T) & { _isSignal: true };
+export type Memo<T> = Signal<T>;
+export type Ref<T> = { current: T };
+export type EffectFn = () => (void | (() => void));
+export type DisposeFn = () => void;
+export type Subscriber = { run: () => void; dependencies: Set<Set<any>>; isRunning: boolean };
+export type TrackingContext = { subscriber: Subscriber };
+
+export type MountCallback = () => void;
+export type UnmountCallback = () => void;
+
 // Global types for internal use
 declare global {
     interface Window {
@@ -28,15 +40,60 @@ declare global {
 
 // Internal reactivity state
 let cE: any = null;
-const cS: any[] = [];
+let cS: any[] = [];
 let bD = 0;
+let isFlushing = false;
+let flushScheduled = false;
 const pE = new Set<any>();
+
+// Lifecycle State
+let isMounted = false;
+const unmountCallbacks = new Set<() => void>();
+
+// Public Reactivity Utilities
+export const trackDependency = (s: Set<any>) => { if (cE) { s.add(cE); cE.dependencies.add(s); } };
+export const notifySubscribers = (s: Set<any> | undefined) => {
+    if (!s) return;
+    const es = Array.from(s);
+    for (const e of es) {
+        if (e.isRunning) continue;
+        if (bD > 0 || isFlushing) pE.add(e);
+        else e.run();
+    }
+};
+export const getCurrentContext = () => cE;
+export const pushContext = (e: any) => { cS.push(cE); cE = e; };
+export const popContext = () => { cE = cS.pop(); };
+export const cleanupContext = (e: any) => { for (const d of e.dependencies) d.delete(e); e.dependencies.clear(); };
+export const startBatch = () => { bD++; };
+export const endBatch = () => { bD--; if (bD === 0) flushEffects(); };
+export const isBatching = () => bD > 0;
+export const runUntracked = <T>(fn: () => T): T => {
+    pushContext(null);
+    try { return fn(); } finally { popContext(); }
+};
+
+// Public Lifecycle Utilities
+export const triggerMount = () => { isMounted = true; };
+export const triggerUnmount = () => {
+    isMounted = false;
+    executeUnmountCallbacks();
+};
+export const executeUnmountCallbacks = () => {
+    for (const cb of unmountCallbacks) {
+        try { cb(); } catch (e) { console.error('Error in unmount callback:', e); }
+    }
+    unmountCallbacks.clear();
+};
+export const getIsMounted = () => isMounted;
+export const getUnmountCallbackCount = () => unmountCallbacks.size;
+export const resetMountState = () => { isMounted = false; };
+export const resetUnmountState = () => { unmountCallbacks.clear(); };
+
 if (typeof window !== 'undefined') {
     window.__ZENITH_EXPRESSIONS__ = new Map();
     window.__ZENITH_SCOPES__ = {};
 }
-let isFlushing = false;
-let flushScheduled = false;
 
 // Phase A3: Post-Mount Execution Hook
 const mountedScopes = new Set<string>();
@@ -53,9 +110,12 @@ export function mountComponent(scopeId: string) {
     }
 }
 
-function pC(e: any) { cS.push(cE); cE = e; }
-function oC() { cE = cS.pop(); }
-function tD(s: Set<any>) { if (cE) { s.add(cE); cE.dependencies.add(s); } }
+// Internal shorthand helpers (matching original compiled code requirements if any)
+const pC = pushContext;
+const oC = popContext;
+const tD = trackDependency;
+const nS = notifySubscribers;
+const cEf = cleanupContext;
 
 export function zenRoute() {
     if (typeof window === 'undefined') return { path: '/', slugs: [] };
@@ -64,16 +124,6 @@ export function zenRoute() {
         path: path,
         slugs: path.split('/').filter(Boolean)
     };
-}
-
-function nS(s: Set<any> | undefined) {
-    if (!s) return;
-    const es = Array.from(s);
-    for (const e of es) {
-        if (e.isRunning) continue;
-        if (bD > 0 || isFlushing) pE.add(e);
-        else e.run();
-    }
 }
 
 function scheduleFlush() {
@@ -100,8 +150,6 @@ function flushEffects() {
         isFlushing = false;
     }
 }
-
-function cEf(e: any) { for (const d of e.dependencies) d.delete(e); e.dependencies.clear(); }
 
 export const signal = function (v: any) {
     const s = new Set<any>();
@@ -190,21 +238,27 @@ export const memo = function (fn: () => any) {
 };
 
 export const batch = function (fn: () => void) {
-    bD++;
-    try { fn(); } finally {
-        bD--;
-        if (bD === 0) flushEffects();
-    }
+    startBatch();
+    try { fn(); } finally { endBatch(); }
 };
 
 export const untrack = function (fn: () => any) {
-    pC(null);
-    try { return fn(); } finally { oC(); }
+    return runUntracked(fn);
 };
 
 export const ref = (i: any) => ({ current: i || null });
-export const onMount = (cb: () => void) => { if (window.__zenith && window.__zenith.activeInstance) window.__zenith.activeInstance.mountHooks.push(cb); };
-export const onUnmount = (cb: () => void) => { /* TODO */ };
+
+export const onMount = (cb: () => void) => {
+    if (typeof window !== 'undefined' && window.__zenith && window.__zenith.activeInstance) {
+        window.__zenith.activeInstance.mountHooks.push(cb);
+    } else {
+        // Fallback for non-component context or SSR
+        if (isMounted) cb();
+    }
+};
+export const onUnmount = (cb: () => void) => {
+    unmountCallbacks.add(cb);
+};
 
 // DOM Helper (hC)
 function hC(parent: Node, child: any) {
@@ -295,24 +349,6 @@ export function hydrate(state: any, container: Element | Document = document, lo
                 oldTitle = document.createElement('title');
                 headMount.appendChild(oldTitle);
             }
-            const resolveContent = (children: any): string => {
-                let result = '';
-                (Array.isArray(children) ? children : [children]).forEach(child => {
-                    if (child == null || child === false) return;
-                    if (typeof child === 'function') {
-                        const val = child();
-                        if (val != null && val !== false) result += String(val);
-                    } else if (typeof child === 'object' && child.fn) {
-                        const val = child.fn();
-                        if (val != null && val !== false) result += String(val);
-                    } else if (child instanceof Node) {
-                        result += child.textContent || '';
-                    } else {
-                        result += String(child);
-                    }
-                });
-                return result;
-            };
             const titleContent = newTitle.childNodes.length > 0
                 ? Array.from(newTitle.childNodes).map((n: any) => n.textContent).join('')
                 : '';
@@ -407,7 +443,6 @@ export function h(tag: string, props: any, children: any) {
                 if (v && typeof v === 'object' && (v as any).fn) fn = (v as any).fn;
                 if (typeof fn === 'function') {
                     el.addEventListener(k.slice(2).toLowerCase(), (e) => {
-                        // Fix: this binding via call(el, e, el)
                         const h = (fn as Function).call(el, e, el);
                         if (typeof h === 'function') h.call(el, e, el);
                     });
