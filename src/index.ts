@@ -448,3 +448,6 @@ export function fragment(c: any) {
     items.forEach(i => hC(f, i));
     return f;
 }
+
+export * from './dom-hydration.js';
+export * from './thin-runtime.js';
