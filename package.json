@@ -11,14 +11,16 @@
   },
   "files": [
     "src",
-    "RUNTIME_CONTRACT.md"
+    "RUNTIME_CONTRACT.md",
+    "HYDRATION_CONTRACT.md"
   ],
   "scripts": {
-    "test": "node --experimental-vm-modules node_modules/.bin/jest --config jest.config.js"
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest --config jest.config.js"
   },
   "devDependencies": {
     "@jest/globals": "^30.2.0",
     "jest": "^30.2.0",
     "jest-environment-jsdom": "^30.2.0"
-  }
+  },
+  "private": false
 }

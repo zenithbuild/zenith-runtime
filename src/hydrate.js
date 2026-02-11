@@ -1,27 +1,17 @@
 // ---------------------------------------------------------------------------
 // hydrate.js — Zenith Runtime V0
 // ---------------------------------------------------------------------------
-// Single-pass DOM hydration engine.
+// Contract-driven hydration engine.
 //
-// Algorithm:
-//   1. Receive { html, expressions } from __zenith_page()
-//   2. Set container.innerHTML = html
-//   3. Walk DOM once for data-zx-e and data-zx-on-* attributes
-//   4. Build binding table
-//   5. Initialize effects for expression bindings
-//   6. Register event listeners for event bindings
-//   7. Return cleanup handle
-//
-// No recursive diffing. No re-render cycle. No component tree.
+// Runtime discovery is forbidden: this module only resolves selectors from
+// bundler-provided tables and executes explicit index-based bindings.
 // ---------------------------------------------------------------------------
 
-import { effect } from './effect.js';
-import { bindEvent } from './events.js';
-import { _registerDisposer } from './cleanup.js';
+import { _registerDisposer, _registerListener, cleanup } from './cleanup.js';
+import { signal } from './signal.js';
+import { state } from './state.js';
+import { zeneffect } from './zeneffect.js';
 
-const DATA_PREFIX = 'data-zx-';
-const TEXT_BINDING_ATTR = 'data-zx-e';
-const EVENT_PREFIX = 'data-zx-on-';
 const BOOLEAN_ATTRIBUTES = new Set([
     'disabled',
     'checked',
@@ -33,183 +23,382 @@ const BOOLEAN_ATTRIBUTES = new Set([
 ]);
 
 /**
- * Hydrate a container with page module output.
+ * Hydrate a pre-rendered DOM tree using explicit payload tables.
  *
- * @param {HTMLElement} container - DOM element to mount into
- * @param {{ html: string, expressions: (() => any)[] }} page
- * @returns {void}
+ * @param {{
+ *   ir_version: number,
+ *   root: Document | Element,
+ *   expressions: Array<{ marker_index: number, signal_index?: number|null, state_index?: number|null, component_instance?: string|null, component_binding?: string|null, literal?: string|null }>,
+ *   markers: Array<{ index: number, kind: 'text' | 'attr' | 'event', selector: string, attr?: string }>,
+ *   events: Array<{ index: number, event: string, selector: string }>,
+ *   state_values: Array<*>,
+ *   signals: Array<{ id: number, kind: 'signal', state_index: number }>,
+ *   components?: Array<{ instance: string, selector: string, create: Function }>
+ * }} payload
+ * @returns {() => void}
  */
-export function hydrate(container, page) {
-    const { html, expressions } = page;
+export function hydrate(payload) {
+    cleanup();
 
-    // 1. Inject HTML
-    container.innerHTML = html;
+    const normalized = _validatePayload(payload);
+    const { root, expressions, markers, events, stateValues, signals, components } = normalized;
 
-    // 2. Walk DOM once and build binding tables
-    const bindingTable = [];
-    const eventBindings = [];
-    const allElements = container.querySelectorAll('*');
-
-    for (let i = 0; i < allElements.length; i++) {
-        const node = allElements[i];
-        const attrs = node.attributes;
-
-        for (let j = 0; j < attrs.length; j++) {
-            const attr = attrs[j];
-            const name = attr.name;
-            const value = attr.value.trim();
-
-            if (name === TEXT_BINDING_ATTR) {
-                const indices = _parseIndices(value, expressions.length);
-                if (indices.length > 0) {
-                    bindingTable.push({
-                        type: 'text',
-                        node,
-                        indices
-                    });
-                }
-                continue;
+    const componentBindings = Object.create(null);
+    const runtimeApi = Object.freeze({ signal, state, zeneffect });
+    for (let i = 0; i < components.length; i++) {
+        const component = components[i];
+        const hosts = _resolveNodes(root, component.selector, i, 'component');
+        for (let j = 0; j < hosts.length; j++) {
+            const instance = component.create(hosts[j], Object.freeze({}), runtimeApi);
+            if (!instance || typeof instance !== 'object') {
+                throw new Error(`[Zenith Runtime] component factory for ${component.instance} must return an object`);
             }
-
-            if (name.startsWith(EVENT_PREFIX)) {
-                const index = _parseIndex(value, expressions.length);
-                if (index !== null) {
-                    eventBindings.push({
-                        node,
-                        eventName: name.slice(EVENT_PREFIX.length),
-                        index
-                    });
-                }
-                continue;
+            if (typeof instance.mount === 'function') {
+                instance.mount();
             }
-
-            if (!name.startsWith(DATA_PREFIX)) continue;
-
-            const attrName = name.slice(DATA_PREFIX.length);
-            if (!attrName || attrName === 'e' || attrName.startsWith('on-')) {
-                continue;
+            if (typeof instance.destroy === 'function') {
+                _registerDisposer(() => instance.destroy());
             }
-
-            const index = _parseIndex(value, expressions.length);
-            if (index !== null) {
-                bindingTable.push({
-                    type: 'attr',
-                    node,
-                    attrName,
-                    index
-                });
+            if (instance.bindings && typeof instance.bindings === 'object') {
+                componentBindings[component.instance] = instance.bindings;
             }
         }
     }
 
-    // 3. Initialize effects for expression bindings
-    for (let i = 0; i < bindingTable.length; i++) {
-        const binding = bindingTable[i];
+    const signalMap = new Map();
+    const signalIds = new Set();
+    for (let i = 0; i < signals.length; i++) {
+        const signalDescriptor = signals[i];
+        if (signalIds.has(signalDescriptor.id)) {
+            throw new Error(`[Zenith Runtime] duplicate signal id ${signalDescriptor.id}`);
+        }
+        signalIds.add(signalDescriptor.id);
 
-        if (binding.type === 'text') {
-            _bindText(binding.node, binding.indices, expressions);
+        const candidate = stateValues[signalDescriptor.state_index];
+        if (!candidate || typeof candidate !== 'object') {
+            throw new Error(`[Zenith Runtime] signal id ${signalDescriptor.id} did not resolve to an object`);
+        }
+        if (typeof candidate.get !== 'function' || typeof candidate.subscribe !== 'function') {
+            throw new Error(`[Zenith Runtime] signal id ${signalDescriptor.id} must expose get() and subscribe()`);
+        }
+        signalMap.set(signalDescriptor.id, candidate);
+    }
+
+    const expressionMarkerIndices = new Set();
+    for (let i = 0; i < expressions.length; i++) {
+        const expression = expressions[i];
+        if (expressionMarkerIndices.has(expression.marker_index)) {
+            throw new Error(`[Zenith Runtime] duplicate expression marker_index ${expression.marker_index}`);
+        }
+        expressionMarkerIndices.add(expression.marker_index);
+    }
+
+    const markerByIndex = new Map();
+    const markerNodesByIndex = new Map();
+    const markerIndices = new Set();
+    for (let i = 0; i < markers.length; i++) {
+        const marker = markers[i];
+        if (markerIndices.has(marker.index)) {
+            throw new Error(`[Zenith Runtime] duplicate marker index ${marker.index}`);
+        }
+        markerIndices.add(marker.index);
+        markerByIndex.set(marker.index, marker);
+
+        if (marker.kind === 'event') {
             continue;
         }
 
-        _bindAttribute(binding.node, binding.attrName, expressions[binding.index]);
+        const nodes = _resolveNodes(root, marker.selector, marker.index, marker.kind);
+        markerNodesByIndex.set(marker.index, nodes);
+        const value = _evaluateExpression(
+            expressions[marker.index],
+            stateValues,
+            signalMap,
+            componentBindings,
+            marker.kind
+        );
+        _applyMarkerValue(nodes, marker, value);
     }
 
-    // 4. Bind event listeners
-    for (let i = 0; i < eventBindings.length; i++) {
-        const binding = eventBindings[i];
-        bindEvent(binding.node, binding.eventName, expressions[binding.index]);
-    }
-}
-
-/**
- * Bind one or more expression indices to a node's text content.
- *
- * @param {Element} node
- * @param {number[]} indices
- * @param {(() => any)[]} expressions
- */
-function _bindText(node, indices, expressions) {
-    const dispose = effect(() => {
-        let content = '';
-        for (let i = 0; i < indices.length; i++) {
-            const value = expressions[indices[i]]();
-            content += _coerceText(value);
-        }
-
-        node.textContent = content;
-    });
-
-    _registerDisposer(dispose);
-}
-
-/**
- * Bind an attribute expression to a node.
- *
- * @param {Element} node
- * @param {string} attrName
- * @param {() => any} exprFn
- */
-function _bindAttribute(node, attrName, exprFn) {
-    const dispose = effect(() => {
-        _applyAttribute(node, attrName, exprFn());
-    });
-
-    _registerDisposer(dispose);
-}
-
-/**
- * Parse a single expression index.
- *
- * @param {string} value
- * @param {number} max
- * @returns {number | null}
- */
-function _parseIndex(value, max) {
-    const index = Number(value);
-    if (!Number.isInteger(index)) return null;
-    if (index < 0 || index >= max) return null;
-    return index;
-}
-
-/**
- * Parse space-separated indices.
- *
- * @param {string} value
- * @param {number} max
- * @returns {number[]}
- */
-function _parseIndices(value, max) {
-    const parts = value.split(/\s+/).filter(Boolean);
-    const indices = [];
-
-    for (let i = 0; i < parts.length; i++) {
-        const index = _parseIndex(parts[i], max);
-        if (index !== null) {
-            indices.push(index);
+    for (let i = 0; i < expressions.length; i++) {
+        if (!markerIndices.has(i)) {
+            throw new Error(`[Zenith Runtime] missing marker index ${i}`);
         }
     }
 
-    return indices;
+    function renderMarkerByIndex(index) {
+        const marker = markerByIndex.get(index);
+        if (!marker || marker.kind === 'event') {
+            return;
+        }
+        const nodes = markerNodesByIndex.get(index) || _resolveNodes(root, marker.selector, marker.index, marker.kind);
+        markerNodesByIndex.set(index, nodes);
+        const value = _evaluateExpression(
+            expressions[index],
+            stateValues,
+            signalMap,
+            componentBindings,
+            marker.kind
+        );
+        _applyMarkerValue(nodes, marker, value);
+    }
+
+    const dependentMarkersBySignal = new Map();
+    for (let i = 0; i < expressions.length; i++) {
+        const expression = expressions[i];
+        if (!Number.isInteger(expression.signal_index)) {
+            continue;
+        }
+        if (!dependentMarkersBySignal.has(expression.signal_index)) {
+            dependentMarkersBySignal.set(expression.signal_index, []);
+        }
+        dependentMarkersBySignal.get(expression.signal_index).push(expression.marker_index);
+    }
+
+    for (const [signalId, markerIndexes] of dependentMarkersBySignal.entries()) {
+        const targetSignal = signalMap.get(signalId);
+        if (!targetSignal) {
+            throw new Error(`[Zenith Runtime] expression references unknown signal id ${signalId}`);
+        }
+        const unsubscribe = targetSignal.subscribe(() => {
+            for (let i = 0; i < markerIndexes.length; i++) {
+                renderMarkerByIndex(markerIndexes[i]);
+            }
+        });
+        if (typeof unsubscribe === 'function') {
+            _registerDisposer(unsubscribe);
+        }
+    }
+
+    const eventIndices = new Set();
+    for (let i = 0; i < events.length; i++) {
+        const eventBinding = events[i];
+        if (eventIndices.has(eventBinding.index)) {
+            throw new Error(`[Zenith Runtime] duplicate event index ${eventBinding.index}`);
+        }
+        eventIndices.add(eventBinding.index);
+
+        const nodes = _resolveNodes(root, eventBinding.selector, eventBinding.index, 'event');
+        const handler = _evaluateExpression(
+            expressions[eventBinding.index],
+            stateValues,
+            signalMap,
+            componentBindings,
+            'event'
+        );
+        if (typeof handler !== 'function') {
+            throw new Error(`[Zenith Runtime] event binding at index ${eventBinding.index} did not resolve to a function`);
+        }
+
+        for (let j = 0; j < nodes.length; j++) {
+            const node = nodes[j];
+            node.addEventListener(eventBinding.event, handler);
+            _registerListener(node, eventBinding.event, handler);
+        }
+    }
+
+    return cleanup;
 }
 
-/**
- * Coerce expression output for text binding.
- *
- * @param {*} value
- * @returns {string}
- */
+function _validatePayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires an object payload');
+    }
+
+    if (payload.ir_version !== 1) {
+        throw new Error('[Zenith Runtime] unsupported ir_version (expected 1)');
+    }
+
+    const root = payload.root;
+    const hasQuery = !!root && typeof root.querySelectorAll === 'function';
+    if (!hasQuery) {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires payload.root with querySelectorAll');
+    }
+
+    const expressions = payload.expressions;
+    if (!Array.isArray(expressions)) {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires expressions[]');
+    }
+
+    const markers = payload.markers;
+    if (!Array.isArray(markers)) {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires markers[]');
+    }
+
+    const events = payload.events;
+    if (!Array.isArray(events)) {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires events[]');
+    }
+
+    const stateValues = payload.state_values;
+    if (!Array.isArray(stateValues)) {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires state_values[]');
+    }
+
+    const signals = payload.signals;
+    if (!Array.isArray(signals)) {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires signals[]');
+    }
+
+    const components = Array.isArray(payload.components) ? payload.components : [];
+
+    if (markers.length !== expressions.length) {
+        throw new Error(
+            `[Zenith Runtime] marker/expression mismatch: markers=${markers.length}, expressions=${expressions.length}`
+        );
+    }
+
+    for (let i = 0; i < expressions.length; i++) {
+        const expression = expressions[i];
+        if (!expression || typeof expression !== 'object' || Array.isArray(expression)) {
+            throw new Error(`[Zenith Runtime] expression at position ${i} must be an object`);
+        }
+        if (!Number.isInteger(expression.marker_index) || expression.marker_index < 0 || expression.marker_index >= expressions.length) {
+            throw new Error(`[Zenith Runtime] expression at position ${i} has invalid marker_index`);
+        }
+        if (expression.marker_index !== i) {
+            throw new Error(
+                `[Zenith Runtime] expression table out of order at position ${i}: marker_index=${expression.marker_index}`
+            );
+        }
+    }
+
+    for (let i = 0; i < markers.length; i++) {
+        const marker = markers[i];
+        if (!marker || typeof marker !== 'object' || Array.isArray(marker)) {
+            throw new Error(`[Zenith Runtime] marker at position ${i} must be an object`);
+        }
+        if (!Number.isInteger(marker.index) || marker.index < 0 || marker.index >= expressions.length) {
+            throw new Error(`[Zenith Runtime] marker at position ${i} has out-of-bounds index`);
+        }
+        if (marker.index !== i) {
+            throw new Error(`[Zenith Runtime] marker table out of order at position ${i}: index=${marker.index}`);
+        }
+        if (marker.kind !== 'text' && marker.kind !== 'attr' && marker.kind !== 'event') {
+            throw new Error(`[Zenith Runtime] marker at position ${i} has invalid kind`);
+        }
+        if (typeof marker.selector !== 'string' || marker.selector.length === 0) {
+            throw new Error(`[Zenith Runtime] marker at position ${i} requires selector`);
+        }
+        if (marker.kind === 'attr' && (typeof marker.attr !== 'string' || marker.attr.length === 0)) {
+            throw new Error(`[Zenith Runtime] attr marker at position ${i} requires attr name`);
+        }
+    }
+
+    for (let i = 0; i < events.length; i++) {
+        const eventBinding = events[i];
+        if (!eventBinding || typeof eventBinding !== 'object' || Array.isArray(eventBinding)) {
+            throw new Error(`[Zenith Runtime] event binding at position ${i} must be an object`);
+        }
+        if (!Number.isInteger(eventBinding.index) || eventBinding.index < 0 || eventBinding.index >= expressions.length) {
+            throw new Error(`[Zenith Runtime] event binding at position ${i} has out-of-bounds index`);
+        }
+        if (typeof eventBinding.event !== 'string' || eventBinding.event.length === 0) {
+            throw new Error(`[Zenith Runtime] event binding at position ${i} requires event name`);
+        }
+        if (typeof eventBinding.selector !== 'string' || eventBinding.selector.length === 0) {
+            throw new Error(`[Zenith Runtime] event binding at position ${i} requires selector`);
+        }
+    }
+
+    for (let i = 0; i < signals.length; i++) {
+        const signalDescriptor = signals[i];
+        if (!signalDescriptor || typeof signalDescriptor !== 'object' || Array.isArray(signalDescriptor)) {
+            throw new Error(`[Zenith Runtime] signal descriptor at position ${i} must be an object`);
+        }
+        if (signalDescriptor.kind !== 'signal') {
+            throw new Error(`[Zenith Runtime] signal descriptor at position ${i} requires kind="signal"`);
+        }
+        if (!Number.isInteger(signalDescriptor.id) || signalDescriptor.id < 0) {
+            throw new Error(`[Zenith Runtime] signal descriptor at position ${i} requires non-negative id`);
+        }
+        if (!Number.isInteger(signalDescriptor.state_index) || signalDescriptor.state_index < 0 || signalDescriptor.state_index >= stateValues.length) {
+            throw new Error(`[Zenith Runtime] signal descriptor at position ${i} has out-of-bounds state_index`);
+        }
+    }
+
+    for (let i = 0; i < components.length; i++) {
+        const component = components[i];
+        if (!component || typeof component !== 'object' || Array.isArray(component)) {
+            throw new Error(`[Zenith Runtime] component at position ${i} must be an object`);
+        }
+        if (typeof component.instance !== 'string' || component.instance.length === 0) {
+            throw new Error(`[Zenith Runtime] component at position ${i} requires instance`);
+        }
+        if (typeof component.selector !== 'string' || component.selector.length === 0) {
+            throw new Error(`[Zenith Runtime] component at position ${i} requires selector`);
+        }
+        if (typeof component.create !== 'function') {
+            throw new Error(`[Zenith Runtime] component at position ${i} requires create() function`);
+        }
+    }
+
+    return { root, expressions, markers, events, stateValues, signals, components };
+}
+
+function _resolveNodes(root, selector, index, kind) {
+    const nodes = root.querySelectorAll(selector);
+    if (!nodes || nodes.length === 0) {
+        throw new Error(`[Zenith Runtime] unresolved ${kind} marker index ${index} for selector "${selector}"`);
+    }
+    return nodes;
+}
+
+function _evaluateExpression(binding, stateValues, signalMap, componentBindings, mode) {
+    if (binding.signal_index !== null && binding.signal_index !== undefined) {
+        const signalValue = signalMap.get(binding.signal_index);
+        if (!signalValue || typeof signalValue.get !== 'function') {
+            throw new Error('[Zenith Runtime] expression.signal_index did not resolve to a signal');
+        }
+        return mode === 'event' ? signalValue : signalValue.get();
+    }
+
+    if (binding.state_index !== null && binding.state_index !== undefined) {
+        const resolved = stateValues[binding.state_index];
+        if (mode !== 'event' && typeof resolved === 'function') {
+            return resolved();
+        }
+        return resolved;
+    }
+
+    if (typeof binding.component_instance === 'string' && typeof binding.component_binding === 'string') {
+        const instanceBindings = componentBindings[binding.component_instance];
+        const resolved =
+            instanceBindings && Object.prototype.hasOwnProperty.call(instanceBindings, binding.component_binding)
+                ? instanceBindings[binding.component_binding]
+                : undefined;
+        if (mode !== 'event' && typeof resolved === 'function') {
+            return resolved();
+        }
+        return resolved;
+    }
+
+    if (binding.literal !== null && binding.literal !== undefined) {
+        return binding.literal;
+    }
+
+    return '';
+}
+
+function _applyMarkerValue(nodes, marker, value) {
+    for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        if (marker.kind === 'text') {
+            node.textContent = _coerceText(value);
+            continue;
+        }
+
+        if (marker.kind === 'attr') {
+            _applyAttribute(node, marker.attr, value);
+        }
+    }
+}
+
 function _coerceText(value) {
     if (value === null || value === undefined || value === false) return '';
     return String(value);
 }
 
-/**
- * Apply an evaluated expression result to a DOM attribute.
- *
- * @param {Element} node
- * @param {string} attrName
- * @param {*} value
- */
 function _applyAttribute(node, attrName, value) {
     if (attrName === 'class' || attrName === 'className') {
         node.className = value === null || value === undefined || value === false ? '' : String(value);
@@ -230,12 +419,10 @@ function _applyAttribute(node, attrName, value) {
         if (typeof value === 'object') {
             const entries = Object.entries(value);
             let styleText = '';
-
             for (let i = 0; i < entries.length; i++) {
                 const [key, rawValue] = entries[i];
                 styleText += `${key}: ${rawValue};`;
             }
-
             node.setAttribute('style', styleText);
             return;
         }
