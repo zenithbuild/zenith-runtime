@@ -4,9 +4,7 @@
   "type": "module",
   "main": "./src/index.js",
   "exports": {
-    ".": "./src/index.js",
-    "./signal": "./src/signal.js",
-    "./effect": "./src/effect.js"
+    ".": "./src/index.js"
   },
   "publishConfig": {
     "access": "public"

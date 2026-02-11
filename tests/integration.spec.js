@@ -4,6 +4,11 @@
 
 import { signal } from '../src/signal.js';
 import { mount } from '../src/runtime.js';
+import * as runtimeApi from '../src/index.js';
+import { _getCounts } from '../src/cleanup.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 describe('Integration: mount()', () => {
     let container;
@@ -30,6 +35,20 @@ describe('Integration: mount()', () => {
 
         mount(container, pageModule);
         expect(container.innerHTML).toBe('<h1>Hello Zenith</h1>');
+    });
+
+    test('mounts page module from default export function', () => {
+        const pageModule = {
+            default() {
+                return {
+                    html: '<h1>Default Export</h1>',
+                    expressions: []
+                };
+            }
+        };
+
+        mount(container, pageModule);
+        expect(container.innerHTML).toBe('<h1>Default Export</h1>');
     });
 
     test('reactive updates work end-to-end', () => {
@@ -103,7 +122,6 @@ describe('Integration: mount()', () => {
         expect(container.querySelector('p').textContent).toBe('B');
 
         // Old signal should not trigger updates
-        let oldRuns = 0;
         a.set('A2');
         // No assertion needed — just verifying no error/leak
     });
@@ -117,6 +135,7 @@ describe('Integration: mount()', () => {
         expect(() => mount(container, null)).toThrow('[Zenith]');
         expect(() => mount(container, {})).toThrow('[Zenith]');
         expect(() => mount(container, { __zenith_page: 'not a function' })).toThrow('[Zenith]');
+        expect(() => mount(container, { default: 'not a function' })).toThrow('[Zenith]');
     });
 
     test('event + expression end-to-end', () => {
@@ -168,5 +187,50 @@ describe('Integration: mount()', () => {
         }
 
         expect(container.querySelector('span').textContent).toBe('100');
+    });
+
+    test('mount -> cleanup -> mount loop does not leak listeners or effects', () => {
+        const clicks = signal(0);
+        const onClick = () => clicks.set(clicks() + 1);
+
+        const pageModule = {
+            default() {
+                return {
+                    html: '<button data-zx-on-click="0">+</button>',
+                    expressions: [() => onClick]
+                };
+            }
+        };
+
+        for (let i = 0; i < 50; i++) {
+            const unmount = mount(container, pageModule);
+            const button = container.querySelector('button');
+            button.click();
+            unmount();
+            expect(_getCounts().listeners).toBe(0);
+            expect(_getCounts().effects).toBe(0);
+        }
+    });
+});
+
+describe('Contract Guardrails', () => {
+    test('public API exports exactly four symbols', () => {
+        const apiExports = Object.keys(runtimeApi).sort();
+        expect(apiExports).toEqual(['cleanup', 'effect', 'mount', 'signal']);
+    });
+
+    test('runtime source does not use forbidden execution primitives', () => {
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = path.dirname(__filename);
+        const srcDir = path.resolve(__dirname, '../src');
+        const files = fs.readdirSync(srcDir).filter((name) => name.endsWith('.js'));
+
+        for (let i = 0; i < files.length; i++) {
+            const source = fs.readFileSync(path.join(srcDir, files[i]), 'utf8');
+            expect(source.includes('eval(')).toBe(false);
+            expect(source.includes('new Function')).toBe(false);
+            expect(source.includes('with(window)')).toBe(false);
+            expect(source.includes('window.')).toBe(false);
+        }
     });
 });

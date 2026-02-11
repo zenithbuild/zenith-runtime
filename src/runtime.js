@@ -28,15 +28,16 @@ export function mount(container, pageModule) {
         throw new Error('[Zenith] mount() requires an HTMLElement container');
     }
 
-    if (!pageModule || typeof pageModule.__zenith_page !== 'function') {
-        throw new Error('[Zenith] mount() requires a page module with __zenith_page()');
+    const pageFactory = _resolvePageFactory(pageModule);
+    if (!pageFactory) {
+        throw new Error('[Zenith] mount() requires a page module with default() or __zenith_page()');
     }
 
     // 2. Clean up any previous mount
     cleanup();
 
     // 3. Execute page function — receive immutable output
-    const page = pageModule.__zenith_page();
+    const page = pageFactory();
 
     if (!page || typeof page.html !== 'string' || !Array.isArray(page.expressions)) {
         throw new Error('[Zenith] __zenith_page() must return { html: string, expressions: (() => any)[] }');
@@ -50,4 +51,35 @@ export function mount(container, pageModule) {
         cleanup();
         container.innerHTML = '';
     };
+}
+
+/**
+ * Resolve the page module entry function.
+ *
+ * Accepts:
+ * - pageModule.default()
+ * - pageModule.__zenith_page()
+ * - pageModule() (function directly)
+ *
+ * @param {object | function} pageModule
+ * @returns {function | null}
+ */
+function _resolvePageFactory(pageModule) {
+    if (typeof pageModule === 'function') {
+        return pageModule;
+    }
+
+    if (!pageModule || typeof pageModule !== 'object') {
+        return null;
+    }
+
+    if (typeof pageModule.default === 'function') {
+        return pageModule.default;
+    }
+
+    if (typeof pageModule.__zenith_page === 'function') {
+        return pageModule.__zenith_page;
+    }
+
+    return null;
 }

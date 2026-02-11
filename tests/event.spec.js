@@ -4,7 +4,7 @@
 
 import { signal } from '../src/signal.js';
 import { hydrate } from '../src/hydrate.js';
-import { cleanup } from '../src/cleanup.js';
+import { cleanup, _getCounts } from '../src/cleanup.js';
 
 describe('Event Binding', () => {
     let container;
@@ -35,21 +35,16 @@ describe('Event Binding', () => {
         expect(count()).toBe(2);
     });
 
-    test('binds inline handler (expression IS the handler)', () => {
-        const count = signal(0);
-
+    test('ignores non-function event expressions', () => {
         hydrate(container, {
             html: '<button data-zx-on-click="0">Click</button>',
-            // Expression returns non-function — exprFn itself becomes the handler
-            expressions: [() => count.set(count.peek() + 1)]
+            expressions: [() => 42]
         });
 
-        // Note: this pattern means the expression executes once during binding
-        // and the result is not a function, so exprFn is bound as handler
         const btn = container.querySelector('button');
-        // The inline handler runs count.set() when the expression is evaluated
-        // during bindEvent, so count is already 1
-        expect(count()).toBe(1);
+        expect(_getCounts().listeners).toBe(0);
+        btn.click();
+        expect(_getCounts().listeners).toBe(0);
     });
 
     test('multiple event types on same element', () => {
@@ -70,6 +65,26 @@ describe('Event Binding', () => {
 
         input.dispatchEvent(new Event('focus'));
         expect(focused).toBe(true);
+    });
+
+    test('supports mouseover and key events', () => {
+        let hovered = false;
+        let keyValue = '';
+
+        hydrate(container, {
+            html: '<input data-zx-on-mouseover="0" data-zx-on-keyup="1" />',
+            expressions: [
+                () => () => { hovered = true; },
+                () => (e) => { keyValue = e.key; }
+            ]
+        });
+
+        const input = container.querySelector('input');
+        input.dispatchEvent(new Event('mouseover'));
+        expect(hovered).toBe(true);
+
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'k' }));
+        expect(keyValue).toBe('k');
     });
 
     test('event handler receives event object', () => {

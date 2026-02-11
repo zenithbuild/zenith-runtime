@@ -22,27 +22,13 @@ import { _registerListener } from './cleanup.js';
  *
  * @param {Element} element - The DOM element
  * @param {string} eventName - The event name (e.g. "click")
- * @param {() => any} exprFn - Pre-bound expression function that returns a handler
+ * @param {() => any} exprFn - Pre-bound expression function that must resolve to a handler
  */
 export function bindEvent(element, eventName, exprFn) {
-    // The expression function either IS the handler or returns one.
-    // For events, the expression should resolve to a function.
-    //
-    // Two valid patterns:
-    //   expressions[i] = () => increment       → returns a function reference
-    //   expressions[i] = () => count.set(...)   → IS the handler itself
-    //
-    // We handle both:
     const resolved = exprFn();
 
-    if (typeof resolved === 'function') {
-        // Pattern A: expression returns a function reference
-        element.addEventListener(eventName, resolved);
-        _registerListener(element, eventName, resolved);
-    } else {
-        // Pattern B: expression IS the handler (wrap exprFn as the handler)
-        // This covers inline expressions like () => count.set(count() + 1)
-        element.addEventListener(eventName, exprFn);
-        _registerListener(element, eventName, exprFn);
-    }
+    if (typeof resolved !== 'function') return;
+
+    element.addEventListener(eventName, resolved);
+    _registerListener(element, eventName, resolved);
 }

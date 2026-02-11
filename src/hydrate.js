@@ -17,7 +17,20 @@
 
 import { effect } from './effect.js';
 import { bindEvent } from './events.js';
-import { _registerDisposer, _registerListener } from './cleanup.js';
+import { _registerDisposer } from './cleanup.js';
+
+const DATA_PREFIX = 'data-zx-';
+const TEXT_BINDING_ATTR = 'data-zx-e';
+const EVENT_PREFIX = 'data-zx-on-';
+const BOOLEAN_ATTRIBUTES = new Set([
+    'disabled',
+    'checked',
+    'readonly',
+    'required',
+    'selected',
+    'open',
+    'hidden'
+]);
 
 /**
  * Hydrate a container with page module output.
@@ -32,66 +45,218 @@ export function hydrate(container, page) {
     // 1. Inject HTML
     container.innerHTML = html;
 
-    // 2. Collect all nodes with expression bindings
-    const exprNodes = container.querySelectorAll('[data-zx-e]');
+    // 2. Walk DOM once and build binding tables
+    const bindingTable = [];
+    const eventBindings = [];
+    const allElements = container.querySelectorAll('*');
 
-    for (let i = 0; i < exprNodes.length; i++) {
-        const node = exprNodes[i];
-        const attr = node.getAttribute('data-zx-e');
-        if (!attr) continue;
+    for (let i = 0; i < allElements.length; i++) {
+        const node = allElements[i];
+        const attrs = node.attributes;
 
-        // Parse space-separated indices
-        const indices = attr.split(/\s+/).map(Number);
+        for (let j = 0; j < attrs.length; j++) {
+            const attr = attrs[j];
+            const name = attr.name;
+            const value = attr.value.trim();
 
-        for (let j = 0; j < indices.length; j++) {
-            const index = indices[j];
-            if (index >= 0 && index < expressions.length) {
-                _bindExpression(node, expressions[index]);
+            if (name === TEXT_BINDING_ATTR) {
+                const indices = _parseIndices(value, expressions.length);
+                if (indices.length > 0) {
+                    bindingTable.push({
+                        type: 'text',
+                        node,
+                        indices
+                    });
+                }
+                continue;
+            }
+
+            if (name.startsWith(EVENT_PREFIX)) {
+                const index = _parseIndex(value, expressions.length);
+                if (index !== null) {
+                    eventBindings.push({
+                        node,
+                        eventName: name.slice(EVENT_PREFIX.length),
+                        index
+                    });
+                }
+                continue;
+            }
+
+            if (!name.startsWith(DATA_PREFIX)) continue;
+
+            const attrName = name.slice(DATA_PREFIX.length);
+            if (!attrName || attrName === 'e' || attrName.startsWith('on-')) {
+                continue;
+            }
+
+            const index = _parseIndex(value, expressions.length);
+            if (index !== null) {
+                bindingTable.push({
+                    type: 'attr',
+                    node,
+                    attrName,
+                    index
+                });
             }
         }
     }
 
-    // 3. Collect all nodes with event bindings (data-zx-on-*)
-    // Match any attribute starting with data-zx-on-
-    const allElements = container.querySelectorAll('*');
+    // 3. Initialize effects for expression bindings
+    for (let i = 0; i < bindingTable.length; i++) {
+        const binding = bindingTable[i];
 
-    for (let i = 0; i < allElements.length; i++) {
-        const el = allElements[i];
-        const attrs = el.attributes;
-
-        for (let j = 0; j < attrs.length; j++) {
-            const attrName = attrs[j].name;
-            if (!attrName.startsWith('data-zx-on-')) continue;
-
-            const eventName = attrName.slice('data-zx-on-'.length); // e.g. "click"
-            const index = Number(attrs[j].value);
-
-            if (index >= 0 && index < expressions.length) {
-                bindEvent(el, eventName, expressions[index]);
-            }
+        if (binding.type === 'text') {
+            _bindText(binding.node, binding.indices, expressions);
+            continue;
         }
+
+        _bindAttribute(binding.node, binding.attrName, expressions[binding.index]);
+    }
+
+    // 4. Bind event listeners
+    for (let i = 0; i < eventBindings.length; i++) {
+        const binding = eventBindings[i];
+        bindEvent(binding.node, binding.eventName, expressions[binding.index]);
     }
 }
 
 /**
- * Bind a pre-bound expression function to a DOM node via effect.
- *
- * The effect re-runs whenever any signal read inside `exprFn` changes,
- * automatically updating the node's textContent.
+ * Bind one or more expression indices to a node's text content.
  *
  * @param {Element} node
- * @param {() => any} exprFn
+ * @param {number[]} indices
+ * @param {(() => any)[]} expressions
  */
-function _bindExpression(node, exprFn) {
+function _bindText(node, indices, expressions) {
     const dispose = effect(() => {
-        const value = exprFn();
-        // Coerce to string, handling null/undefined/false
-        if (value === null || value === undefined || value === false) {
-            node.textContent = '';
-        } else {
-            node.textContent = String(value);
+        let content = '';
+        for (let i = 0; i < indices.length; i++) {
+            const value = expressions[indices[i]]();
+            content += _coerceText(value);
         }
+
+        node.textContent = content;
     });
 
     _registerDisposer(dispose);
+}
+
+/**
+ * Bind an attribute expression to a node.
+ *
+ * @param {Element} node
+ * @param {string} attrName
+ * @param {() => any} exprFn
+ */
+function _bindAttribute(node, attrName, exprFn) {
+    const dispose = effect(() => {
+        _applyAttribute(node, attrName, exprFn());
+    });
+
+    _registerDisposer(dispose);
+}
+
+/**
+ * Parse a single expression index.
+ *
+ * @param {string} value
+ * @param {number} max
+ * @returns {number | null}
+ */
+function _parseIndex(value, max) {
+    const index = Number(value);
+    if (!Number.isInteger(index)) return null;
+    if (index < 0 || index >= max) return null;
+    return index;
+}
+
+/**
+ * Parse space-separated indices.
+ *
+ * @param {string} value
+ * @param {number} max
+ * @returns {number[]}
+ */
+function _parseIndices(value, max) {
+    const parts = value.split(/\s+/).filter(Boolean);
+    const indices = [];
+
+    for (let i = 0; i < parts.length; i++) {
+        const index = _parseIndex(parts[i], max);
+        if (index !== null) {
+            indices.push(index);
+        }
+    }
+
+    return indices;
+}
+
+/**
+ * Coerce expression output for text binding.
+ *
+ * @param {*} value
+ * @returns {string}
+ */
+function _coerceText(value) {
+    if (value === null || value === undefined || value === false) return '';
+    return String(value);
+}
+
+/**
+ * Apply an evaluated expression result to a DOM attribute.
+ *
+ * @param {Element} node
+ * @param {string} attrName
+ * @param {*} value
+ */
+function _applyAttribute(node, attrName, value) {
+    if (attrName === 'class' || attrName === 'className') {
+        node.className = value === null || value === undefined || value === false ? '' : String(value);
+        return;
+    }
+
+    if (attrName === 'style') {
+        if (value === null || value === undefined || value === false) {
+            node.removeAttribute('style');
+            return;
+        }
+
+        if (typeof value === 'string') {
+            node.setAttribute('style', value);
+            return;
+        }
+
+        if (typeof value === 'object') {
+            const entries = Object.entries(value);
+            let styleText = '';
+
+            for (let i = 0; i < entries.length; i++) {
+                const [key, rawValue] = entries[i];
+                styleText += `${key}: ${rawValue};`;
+            }
+
+            node.setAttribute('style', styleText);
+            return;
+        }
+
+        node.setAttribute('style', String(value));
+        return;
+    }
+
+    if (BOOLEAN_ATTRIBUTES.has(attrName)) {
+        if (value) {
+            node.setAttribute(attrName, '');
+        } else {
+            node.removeAttribute(attrName);
+        }
+        return;
+    }
+
+    if (value === null || value === undefined || value === false) {
+        node.removeAttribute(attrName);
+        return;
+    }
+
+    node.setAttribute(attrName, String(value));
 }
