@@ -1,12 +1,7 @@
-// ---------------------------------------------------------------------------
-// event.spec.js — Event binding tests
-// ---------------------------------------------------------------------------
-
-import { signal } from '../src/signal.js';
 import { hydrate } from '../src/hydrate.js';
 import { cleanup, _getCounts } from '../src/cleanup.js';
 
-describe('Event Binding', () => {
+describe('hydrate() event contract', () => {
     let container;
 
     beforeEach(() => {
@@ -19,85 +14,37 @@ describe('Event Binding', () => {
         document.body.removeChild(container);
     });
 
-    test('binds click handler from data-zx-on-click', () => {
-        const count = signal(0);
-        const increment = () => count.set(count() + 1);
+    test('binds event listeners by explicit index', () => {
+        let clicks = 0;
+        container.innerHTML = '<button data-zx-on-click="0">+</button>';
 
-        hydrate(container, {
-            html: '<button data-zx-on-click="0">Click</button>',
-            expressions: [() => increment]
+        hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [{ marker_index: 0, state_index: 0 }],
+            markers: [{ index: 0, kind: 'event', selector: '[data-zx-on-click="0"]' }],
+            events: [{ index: 0, event: 'click', selector: '[data-zx-on-click="0"]' }],
+            state_values: [() => { clicks += 1; }],
+            signals: []
         });
 
-        const btn = container.querySelector('button');
-        btn.click();
-        expect(count()).toBe(1);
-        btn.click();
-        expect(count()).toBe(2);
+        container.querySelector('button').click();
+        container.querySelector('button').click();
+        expect(clicks).toBe(2);
+        expect(_getCounts().listeners).toBe(1);
     });
 
-    test('ignores non-function event expressions', () => {
-        hydrate(container, {
-            html: '<button data-zx-on-click="0">Click</button>',
-            expressions: [() => 42]
-        });
+    test('fails when event expression does not resolve to function', () => {
+        container.innerHTML = '<button data-zx-on-click="0">+</button>';
 
-        const btn = container.querySelector('button');
-        expect(_getCounts().listeners).toBe(0);
-        btn.click();
-        expect(_getCounts().listeners).toBe(0);
-    });
-
-    test('multiple event types on same element', () => {
-        let clicked = false;
-        let focused = false;
-
-        hydrate(container, {
-            html: '<input data-zx-on-click="0" data-zx-on-focus="1" />',
-            expressions: [
-                () => () => { clicked = true; },
-                () => () => { focused = true; }
-            ]
-        });
-
-        const input = container.querySelector('input');
-        input.click();
-        expect(clicked).toBe(true);
-
-        input.dispatchEvent(new Event('focus'));
-        expect(focused).toBe(true);
-    });
-
-    test('supports mouseover and key events', () => {
-        let hovered = false;
-        let keyValue = '';
-
-        hydrate(container, {
-            html: '<input data-zx-on-mouseover="0" data-zx-on-keyup="1" />',
-            expressions: [
-                () => () => { hovered = true; },
-                () => (e) => { keyValue = e.key; }
-            ]
-        });
-
-        const input = container.querySelector('input');
-        input.dispatchEvent(new Event('mouseover'));
-        expect(hovered).toBe(true);
-
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'k' }));
-        expect(keyValue).toBe('k');
-    });
-
-    test('event handler receives event object', () => {
-        let receivedEvent = null;
-
-        hydrate(container, {
-            html: '<button data-zx-on-click="0">Click</button>',
-            expressions: [() => (e) => { receivedEvent = e; }]
-        });
-
-        const btn = container.querySelector('button');
-        btn.click();
-        expect(receivedEvent).toBeInstanceOf(Event);
-        expect(receivedEvent.type).toBe('click');
+        expect(() => hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [{ marker_index: 0, state_index: 0 }],
+            markers: [{ index: 0, kind: 'event', selector: '[data-zx-on-click="0"]' }],
+            events: [{ index: 0, event: 'click', selector: '[data-zx-on-click="0"]' }],
+            state_values: [42],
+            signals: []
+        })).toThrow('did not resolve to a function');
     });
 });

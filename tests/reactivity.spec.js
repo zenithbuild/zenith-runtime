@@ -1,156 +1,66 @@
-// ---------------------------------------------------------------------------
-// reactivity.spec.js — Signal & Effect tests
-// ---------------------------------------------------------------------------
-
 import { signal } from '../src/signal.js';
-import { effect } from '../src/effect.js';
+import { state } from '../src/state.js';
+import { zeneffect } from '../src/zeneffect.js';
 
-describe('Signal', () => {
-    test('creates with initial value', () => {
+describe('signal()', () => {
+    test('uses explicit get/set API', () => {
         const count = signal(0);
-        expect(count()).toBe(0);
-    });
-
-    test('reads current value', () => {
-        const name = signal('Zenith');
-        expect(name()).toBe('Zenith');
-    });
-
-    test('writes new value via .set()', () => {
-        const count = signal(0);
+        expect(count.get()).toBe(0);
         count.set(5);
-        expect(count()).toBe(5);
+        expect(count.get()).toBe(5);
     });
 
-    test('peek reads without tracking', () => {
-        const count = signal(0);
-        let runs = 0;
+    test('notifies explicit subscribers only on value change', () => {
+        const count = signal(1);
+        const calls = [];
+        const unsubscribe = count.subscribe((value) => calls.push(value));
 
-        effect(() => {
-            count.peek(); // Should NOT track
-            runs++;
-        });
+        count.set(2);
+        count.set(2);
+        count.set(3);
+        unsubscribe();
+        count.set(4);
 
-        expect(runs).toBe(1);
-        count.set(1);
-        expect(runs).toBe(1); // Effect should NOT re-run
-    });
-
-    test('no-op when setting same value (Object.is)', () => {
-        const count = signal(0);
-        let runs = 0;
-
-        effect(() => {
-            count();
-            runs++;
-        });
-
-        expect(runs).toBe(1);
-        count.set(0); // Same value
-        expect(runs).toBe(1); // Should NOT re-run
-    });
-
-    test('handles NaN correctly (NaN === NaN via Object.is)', () => {
-        const val = signal(NaN);
-        let runs = 0;
-
-        effect(() => {
-            val();
-            runs++;
-        });
-
-        expect(runs).toBe(1);
-        val.set(NaN); // NaN is same via Object.is
-        expect(runs).toBe(1);
+        expect(calls).toEqual([2, 3]);
     });
 });
 
-describe('Effect', () => {
-    test('runs immediately on creation', () => {
-        let ran = false;
-        effect(() => { ran = true; });
-        expect(ran).toBe(true);
+describe('state()', () => {
+    test('returns immutable snapshots', () => {
+        const store = state({ a: 1, b: 2 });
+        const first = store.get();
+        expect(Object.isFrozen(first)).toBe(true);
+
+        const next = store.set({ b: 3 });
+        expect(next).toEqual({ a: 1, b: 3 });
+        expect(Object.isFrozen(next)).toBe(true);
     });
 
-    test('re-runs when dependency signal changes', () => {
+    test('supports functional updater', () => {
+        const store = state({ count: 1 });
+        store.set((prev) => ({ ...prev, count: prev.count + 1 }));
+        expect(store.get()).toEqual({ count: 2 });
+    });
+});
+
+describe('zeneffect()', () => {
+    test('requires explicit dependencies', () => {
+        expect(() => zeneffect([], () => {})).toThrow('[Zenith Runtime]');
+    });
+
+    test('runs on dependency updates and disposes cleanly', () => {
         const count = signal(0);
-        let observed = -1;
+        const observed = [];
 
-        effect(() => {
-            observed = count();
+        const dispose = zeneffect([count], () => {
+            observed.push(count.get());
         });
 
-        expect(observed).toBe(0);
-        count.set(42);
-        expect(observed).toBe(42);
-    });
-
-    test('tracks multiple signals', () => {
-        const a = signal(1);
-        const b = signal(2);
-        let sum = 0;
-
-        effect(() => {
-            sum = a() + b();
-        });
-
-        expect(sum).toBe(3);
-        a.set(10);
-        expect(sum).toBe(12);
-        b.set(20);
-        expect(sum).toBe(30);
-    });
-
-    test('dispose stops re-execution', () => {
-        const count = signal(0);
-        let runs = 0;
-
-        const dispose = effect(() => {
-            count();
-            runs++;
-        });
-
-        expect(runs).toBe(1);
-        dispose();
         count.set(1);
-        expect(runs).toBe(1); // Should NOT re-run after dispose
-    });
+        count.set(2);
+        dispose();
+        count.set(3);
 
-    test('re-tracks dependencies on each run (dynamic deps)', () => {
-        const cond = signal(true);
-        const a = signal('A');
-        const b = signal('B');
-        let value = '';
-
-        effect(() => {
-            value = cond() ? a() : b();
-        });
-
-        expect(value).toBe('A');
-
-        // Switch condition — now depends on b, not a
-        cond.set(false);
-        expect(value).toBe('B');
-
-        // Changing a should NOT trigger (no longer a dependency)
-        a.set('A2');
-        expect(value).toBe('B');
-
-        // Changing b SHOULD trigger
-        b.set('B2');
-        expect(value).toBe('B2');
-    });
-
-    test('nested signal updates are synchronous', () => {
-        const count = signal(0);
-        const double = signal(0);
-
-        effect(() => {
-            double.set(count() * 2);
-        });
-
-        expect(double()).toBe(0);
-        count.set(5);
-        expect(double()).toBe(10);
+        expect(observed).toEqual([0, 1, 2]);
     });
 });
