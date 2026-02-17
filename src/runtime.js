@@ -39,7 +39,10 @@ export function mount(container, pageModule) {
         events: Array.isArray(page.events) ? page.events : [],
         state_values: Array.isArray(page.state_values) ? page.state_values : [],
         signals: Array.isArray(page.signals) ? page.signals : [],
-        components: Array.isArray(page.components) ? page.components : []
+        components: Array.isArray(page.components) ? page.components : [],
+        route: typeof page.route === 'string' ? page.route : undefined,
+        params: page.params && typeof page.params === 'object' ? page.params : undefined,
+        ssr_data: page.ssr_data && typeof page.ssr_data === 'object' ? page.ssr_data : undefined
     });
 
     return function unmount() {

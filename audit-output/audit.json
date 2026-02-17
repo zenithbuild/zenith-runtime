@@ -1,0 +1,120 @@
+{
+  "recommendation": "Option A",
+  "reason": "Legacy assertions are fully covered by the contract pack (or by cross-repo contracts).",
+  "command_status": {
+    "contract_pack": "PASS",
+    "legacy": "PASS"
+  },
+  "counts": {
+    "legacy_total": 18,
+    "contract_pack_total": 37,
+    "overlap": 18,
+    "legacy_only": 0,
+    "pack_only": 19
+  },
+  "matrix": [
+    {
+      "category": "determinism bytes",
+      "legacy": "N/A",
+      "contract_pack": "PASS",
+      "notes": "contract-pack-only coverage"
+    },
+    {
+      "category": "forbidden tokens (.zen)",
+      "legacy": "N/A",
+      "contract_pack": "PASS",
+      "notes": "contract-pack-only coverage"
+    },
+    {
+      "category": "forbidden tokens (zenith:)",
+      "legacy": "N/A",
+      "contract_pack": "PASS",
+      "notes": "contract-pack-only coverage"
+    },
+    {
+      "category": "forbidden tokens (fetch() )",
+      "legacy": "N/A",
+      "contract_pack": "PASS",
+      "notes": "contract-pack-only coverage"
+    },
+    {
+      "category": "package exports ./template",
+      "legacy": "N/A",
+      "contract_pack": "PASS",
+      "notes": "contract-pack-only coverage"
+    },
+    {
+      "category": "golden output lock",
+      "legacy": "N/A",
+      "contract_pack": "PASS",
+      "notes": "contract-pack-only coverage"
+    },
+    {
+      "category": "browser-global tokens",
+      "legacy": "N/A",
+      "contract_pack": "N/A",
+      "notes": "not asserted"
+    },
+    {
+      "category": "runtime API export lock",
+      "legacy": "PASS",
+      "contract_pack": "PASS",
+      "notes": "covered by both suites"
+    },
+    {
+      "category": "forbidden execution primitives",
+      "legacy": "PASS",
+      "contract_pack": "PASS",
+      "notes": "covered by both suites"
+    },
+    {
+      "category": "no full-tree DOM discovery",
+      "legacy": "PASS",
+      "contract_pack": "PASS",
+      "notes": "covered by both suites"
+    }
+  ],
+  "overlap_fingerprints": [
+    "assert:dom:no-full-tree-query",
+    "assert:forbidden:eval",
+    "assert:forbidden:new-function",
+    "assert:forbidden:process-env",
+    "assert:includes:eval(:false",
+    "assert:includes:new Function:false",
+    "assert:includes:process.env:false",
+    "assert:includes:querySelectorAll('*'):false",
+    "assert:regex:requires params object",
+    "assert:regex:requires ssr_data object",
+    "assert:regex:signal index .* did not resolve",
+    "assert:regex:signal table out of order",
+    "assert:runtime-api-keys:exact-hydrate-signal-state-zeneffect",
+    "assert:runtime-api-keys:present",
+    "includes:eval(",
+    "includes:new Function",
+    "includes:process.env",
+    "includes:querySelectorAll('*')"
+  ],
+  "legacy_only_fingerprints": [],
+  "pack_only_fingerprints": [
+    "assert:determinism:golden-output",
+    "assert:determinism:sourceA-equals-sourceB",
+    "assert:exports:template-subpath",
+    "assert:includes:.zen:false",
+    "assert:includes:\\r:false",
+    "assert:includes:fetch(:false",
+    "assert:includes:requires params object:true",
+    "assert:includes:requires ssr_data object:true",
+    "assert:includes:signal index ${descriptor.index} did not resolve:true",
+    "assert:includes:signal table out of order:true",
+    "assert:includes:zenith::false",
+    "includes:.zen",
+    "includes:\\r",
+    "includes:fetch(",
+    "includes:requires params object",
+    "includes:requires ssr_data object",
+    "includes:signal index ${descriptor.index} did not resolve",
+    "includes:signal table out of order",
+    "includes:zenith:"
+  ],
+  "legacy_only_runtime_specific": []
+}

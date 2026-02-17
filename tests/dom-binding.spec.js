@@ -147,6 +147,6 @@ describe('hydrate() marker contract', () => {
             events: [],
             state_values: [count],
             signals: [{ id: 0, kind: 'signal', state_index: 0 }]
-        })).toThrow('did not resolve to a signal');
+        })).toThrow('out-of-bounds signal_index');
     });
 });

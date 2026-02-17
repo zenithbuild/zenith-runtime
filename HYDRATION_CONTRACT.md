@@ -20,7 +20,7 @@ Forbidden:
 Runtime primitives are explicit:
 - `signal(initial)`
 - `state(initialObject)`
-- `zeneffect(dependencies, fn)`
+- `zeneffect(fn, dependencies)`
 
 Forbidden:
 - Proxy-based tracking.
@@ -44,17 +44,22 @@ Hydration is explicit and called by bundler bootstrap only:
 ```js
 hydrate({
   ir_version: 1,
+  graph_hash: __zenith_graph_hash,
   root: document,
   expressions: __zenith_expr,
   markers: __zenith_markers,
   events: __zenith_events,
   state_values: __zenith_state_values,
   signals: __zenith_signals,
-  components: __zenith_components
+  components: __zenith_components,
+  params: __zenith_params,
+  ssr_data: __zenith_ssr_data
 });
 ```
 
 Runtime must export functions only. Runtime must not auto-run.
+
+`graph_hash` is compile-time identity metadata. Runtime does not recompute graph shape.
 
 ## 5. Component Factory Payload
 
@@ -96,3 +101,19 @@ Forbidden in runtime/bundler output:
 - `process.env`
 
 Compile-time guarantees override runtime flexibility.
+
+## 8. Runtime API Freeze
+
+Runtime public API is closed for V0:
+- `hydrate(payload)`
+- `signal(initial)`
+- `state(initialObject)`
+- `zeneffect(dependencies, fn)`
+- `zeneffect(fn, dependencies)`
+
+No additional runtime helpers may be exported in V0.
+
+Any runtime API expansion requires:
+1. A contract update.
+2. Integration hardening tests.
+3. Major version bump.

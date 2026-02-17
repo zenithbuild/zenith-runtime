@@ -1,0 +1,40 @@
+CATEGORY | LEGACY | CONTRACT_PACK | NOTES
+-----------------------------------------
+determinism bytes | N/A | PASS | contract-pack-only coverage
+forbidden tokens (.zen) | N/A | PASS | contract-pack-only coverage
+forbidden tokens (zenith:) | N/A | PASS | contract-pack-only coverage
+forbidden tokens (fetch() ) | N/A | PASS | contract-pack-only coverage
+package exports ./template | N/A | PASS | contract-pack-only coverage
+golden output lock | N/A | PASS | contract-pack-only coverage
+browser-global tokens | N/A | N/A | not asserted
+runtime API export lock | PASS | PASS | covered by both suites
+forbidden execution primitives | PASS | PASS | covered by both suites
+no full-tree DOM discovery | PASS | PASS | covered by both suites
+
+Legacy-only fingerprints (0):
+
+Pack-only fingerprints (19):
+- assert:determinism:golden-output
+- assert:determinism:sourceA-equals-sourceB
+- assert:exports:template-subpath
+- assert:includes:.zen:false
+- assert:includes:\r:false
+- assert:includes:fetch(:false
+- assert:includes:requires params object:true
+- assert:includes:requires ssr_data object:true
+- assert:includes:signal index ${descriptor.index} did not resolve:true
+- assert:includes:signal table out of order:true
+- assert:includes:zenith::false
+- includes:.zen
+- includes:\r
+- includes:fetch(
+- includes:requires params object
+- includes:requires ssr_data object
+- includes:signal index ${descriptor.index} did not resolve
+- includes:signal table out of order
+- includes:zenith:
+
+RECOMMENDATION: Option A
+REASON: Legacy assertions are fully covered by the contract pack (or by cross-repo contracts).
+EVIDENCE: legacy_only=0, overlap=18, pack_only=19
+Top 10 legacy-only fingerprints:

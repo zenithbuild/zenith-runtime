@@ -1,20 +1,8 @@
 // ---------------------------------------------------------------------------
-// signal.js — Zenith Runtime V0
+// signal.js — Zenith Runtime signal primitive
 // ---------------------------------------------------------------------------
-// Minimal explicit signal primitive.
-//
-// API:
-//   const count = signal(0);
-//   count.get();
-//   count.set(1);
-//   const unsubscribe = count.subscribe((value) => { ... });
-//
-// Constraints:
-//   - No proxy
-//   - No implicit dependency tracking
-//   - No scheduler
-//   - No async queue
-// ---------------------------------------------------------------------------
+
+import { _nextReactiveId, _trackDependency } from './zeneffect.js';
 
 /**
  * Create a deterministic signal with explicit subscription semantics.
@@ -26,8 +14,9 @@ export function signal(initialValue) {
     let value = initialValue;
     const subscribers = new Set();
 
-    return {
+    const self = {
         get() {
+            _trackDependency(self);
             return value;
         },
         set(nextValue) {
@@ -55,4 +44,13 @@ export function signal(initialValue) {
             };
         }
     };
+
+    Object.defineProperty(self, '__zenith_id', {
+        value: _nextReactiveId(),
+        enumerable: false,
+        configurable: false,
+        writable: false
+    });
+
+    return self;
 }

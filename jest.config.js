@@ -4,4 +4,7 @@ export default {
     transform: {},
     extensionsToTreatAsEsm: [],
     moduleNameMapper: {},
+    testMatch: [
+        '**/tests/**/*.spec.js'
+    ]
 };

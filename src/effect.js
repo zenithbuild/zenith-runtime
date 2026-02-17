@@ -1,3 +1,5 @@
-// Deprecated compatibility shim.
-// Runtime V0 contract uses explicit `zeneffect(deps, fn)`.
-export { zeneffect as effect } from './zeneffect.js';
+// ---------------------------------------------------------------------------
+// effect.js — compatibility export
+// ---------------------------------------------------------------------------
+
+export { zenEffect as effect } from './zeneffect.js';

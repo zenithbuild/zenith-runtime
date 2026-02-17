@@ -4,7 +4,8 @@
   "type": "module",
   "main": "./src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./template": "./src/template.js"
   },
   "publishConfig": {
     "access": "public"
@@ -15,7 +16,12 @@
     "HYDRATION_CONTRACT.md"
   ],
   "scripts": {
-    "test": "NODE_OPTIONS=--experimental-vm-modules jest --config jest.config.js"
+    "test": "npm run contract:deps && npm run contract:scan && npm run contract:template",
+    "test:legacy": "NODE_OPTIONS=--experimental-vm-modules jest --config jest.config.js tests/integration.spec.js",
+    "contract:deps": "node dependency_contract.spec.js",
+    "contract:scan": "node contract-scan.mjs",
+    "contract:template": "node template-contract.spec.js",
+    "audit:contracts": "node scripts/audit-contract-coverage.mjs"
   },
   "devDependencies": {
     "@jest/globals": "^30.2.0",

@@ -43,13 +43,16 @@ hydrate({
   events,
   state_values,
   signals,
-  components
+  components,
+  params,
+  ssr_data
 });
 ```
 
 Runtime responsibilities:
 - Validate payload contract.
 - Bind markers/events by index.
+- Resolve `params.*` and `ssr.*` literals from explicit payload objects.
 - Subscribe signal updates to dependent markers.
 - Throw on contract drift.
 
@@ -60,5 +63,6 @@ Runtime responsibilities:
 - No global DOM discovery passes.
 - No table reordering/remapping.
 - No implicit lifecycle/component framework behavior.
+- No runtime API expansion in V0 (sealed exports only).
 
 Compiler defines structure. Bundler serializes structure. Runtime executes structure.

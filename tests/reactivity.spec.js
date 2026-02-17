@@ -45,16 +45,16 @@ describe('state()', () => {
 
 describe('zeneffect()', () => {
     test('requires explicit dependencies', () => {
-        expect(() => zeneffect([], () => {})).toThrow('[Zenith Runtime]');
+        expect(() => zeneffect(() => {}, [])).toThrow('[Zenith Runtime]');
     });
 
     test('runs on dependency updates and disposes cleanly', () => {
         const count = signal(0);
         const observed = [];
 
-        const dispose = zeneffect([count], () => {
+        const dispose = zeneffect(() => {
             observed.push(count.get());
-        });
+        }, [count]);
 
         count.set(1);
         count.set(2);
@@ -62,5 +62,23 @@ describe('zeneffect()', () => {
         count.set(3);
 
         expect(observed).toEqual([0, 1, 2]);
+    });
+
+    test('runs cleanup before re-run and on dispose', () => {
+        const count = signal(0);
+        const cleanups = [];
+
+        const dispose = zeneffect(() => {
+            const value = count.get();
+            return () => {
+                cleanups.push(value);
+            };
+        }, [count]);
+
+        count.set(1);
+        count.set(2);
+        dispose();
+
+        expect(cleanups).toEqual([0, 1, 2]);
     });
 });

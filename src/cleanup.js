@@ -1,15 +1,8 @@
 // ---------------------------------------------------------------------------
-// cleanup.js — Zenith Runtime V0
+// cleanup.js — Zenith Runtime teardown
 // ---------------------------------------------------------------------------
-// Deterministic teardown system.
-//
-// Tracks:
-//   - Active effect disposers
-//   - Active event listeners
-//
-// cleanup() removes everything.
-// Calling cleanup() twice is a no-op.
-// ---------------------------------------------------------------------------
+
+import { resetGlobalSideEffects } from './zeneffect.js';
 
 /** @type {function[]} */
 const _disposers = [];
@@ -20,17 +13,20 @@ const _listeners = [];
 let _cleaned = false;
 
 /**
- * Register an effect disposer for later cleanup.
+ * Register a disposer for deterministic teardown.
  *
  * @param {function} dispose
  */
 export function _registerDisposer(dispose) {
+    if (typeof dispose !== 'function') {
+        throw new Error('[Zenith Runtime] _registerDisposer(dispose) requires a function');
+    }
     _disposers.push(dispose);
     _cleaned = false;
 }
 
 /**
- * Register an event listener for later cleanup.
+ * Register an event listener for deterministic teardown.
  *
  * @param {Element} element
  * @param {string} event
@@ -44,26 +40,33 @@ export function _registerListener(element, event, handler) {
 /**
  * Tear down all active effects and event listeners.
  *
- * - Disposes all effects (clears subscriber sets)
- * - Removes all event listeners
- * - Clears registries
- * - Idempotent: calling twice is a no-op
+ * Idempotent: calling twice is a no-op.
  */
 export function cleanup() {
     if (_cleaned) return;
 
-    // 1. Dispose all effects
-    for (let i = 0; i < _disposers.length; i++) {
-        _disposers[i]();
+    // Dispose in reverse registration order for deterministic teardown semantics.
+    for (let i = _disposers.length - 1; i >= 0; i--) {
+        try {
+            _disposers[i]();
+        } catch {
+            // cleanup errors must not interrupt teardown
+        }
     }
     _disposers.length = 0;
 
-    // 2. Remove all event listeners
-    for (let i = 0; i < _listeners.length; i++) {
+    for (let i = _listeners.length - 1; i >= 0; i--) {
         const { element, event, handler } = _listeners[i];
-        element.removeEventListener(event, handler);
+        try {
+            element.removeEventListener(event, handler);
+        } catch {
+            // DOM teardown should stay resilient
+        }
     }
     _listeners.length = 0;
+
+    // Any page-level zenEffect/zenMount registrations are tied to the global side-effect scope.
+    resetGlobalSideEffects();
 
     _cleaned = true;
 }

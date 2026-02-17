@@ -1,43 +1,55 @@
 // ---------------------------------------------------------------------------
-// state.js — Zenith Runtime V0
+// state.js — Zenith Runtime state primitive
 // ---------------------------------------------------------------------------
-// Proxy-free immutable state helper.
-//
-// API:
-//   const store = state({ count: 0 });
-//   store.get();
-//   store.set({ count: 1 });
-//   store.set((prev) => ({ ...prev, count: prev.count + 1 }));
-// ---------------------------------------------------------------------------
+
+import { _nextReactiveId, _trackDependency } from './zeneffect.js';
+
+function isPlainObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return false;
+    }
+    return Object.prototype.toString.call(value) === '[object Object]';
+}
+
+function freezeSnapshot(value) {
+    if (Array.isArray(value)) {
+        return Object.freeze([...value]);
+    }
+    if (isPlainObject(value)) {
+        return Object.freeze({ ...value });
+    }
+    return value;
+}
 
 /**
- * Create a proxy-free immutable state container.
+ * Create a deterministic reactive state container.
  *
- * @param {object} initialValue
- * @returns {{ get: () => object, set: (patch: object | ((prev: object) => object)) => object, subscribe: (fn: (next: object) => void) => () => void }}
+ * - Primitive values are set directly.
+ * - Plain-object patches merge into prior object snapshots.
+ * - Functional updaters receive the previous snapshot.
+ *
+ * @param {*} initialValue
+ * @returns {{ get: () => *, set: (next: * | ((prev: *) => *)) => *, subscribe: (fn: (next: *) => void) => () => void }}
  */
 export function state(initialValue) {
-    if (!initialValue || typeof initialValue !== 'object' || Array.isArray(initialValue)) {
-        throw new Error('[Zenith Runtime] state(initial) requires a plain object');
-    }
-
-    let current = Object.freeze({ ...initialValue });
+    let current = freezeSnapshot(initialValue);
     const subscribers = new Set();
 
-    return {
+    const self = {
         get() {
+            _trackDependency(self);
             return current;
         },
         set(nextPatch) {
-            const nextValue = typeof nextPatch === 'function'
+            const candidate = typeof nextPatch === 'function'
                 ? nextPatch(current)
-                : { ...current, ...nextPatch };
+                : nextPatch;
 
-            if (!nextValue || typeof nextValue !== 'object' || Array.isArray(nextValue)) {
-                throw new Error('[Zenith Runtime] state.set(next) must resolve to a plain object');
-            }
+            const nextValue = isPlainObject(current) && isPlainObject(candidate)
+                ? { ...current, ...candidate }
+                : candidate;
 
-            const frozenNext = Object.freeze({ ...nextValue });
+            const frozenNext = freezeSnapshot(nextValue);
             if (Object.is(current, frozenNext)) {
                 return current;
             }
@@ -62,4 +74,13 @@ export function state(initialValue) {
             };
         }
     };
+
+    Object.defineProperty(self, '__zenith_id', {
+        value: _nextReactiveId(),
+        enumerable: false,
+        configurable: false,
+        writable: false
+    });
+
+    return self;
 }
