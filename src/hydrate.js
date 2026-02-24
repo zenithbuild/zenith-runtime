@@ -8,19 +8,31 @@
 // ---------------------------------------------------------------------------
 
 import { _registerDisposer, _registerListener, cleanup } from './cleanup.js';
+import { isZenithRuntimeError, rethrowZenithRuntimeError, throwZenithRuntimeError } from './diagnostics.js';
 import { signal } from './signal.js';
 import { state } from './state.js';
-import { zeneffect } from './zeneffect.js';
+import {
+    zeneffect,
+    zenMount,
+    createSideEffectScope,
+    activateSideEffectScope,
+    disposeSideEffectScope
+} from './zeneffect.js';
+
+const ALIAS_CONFLICT = Symbol('alias_conflict');
+const ACTIVE_MARKER_CLASS = 'z-active';
+const UNRESOLVED_LITERAL = Symbol('unresolved_literal');
+const LEGACY_MARKUP_HELPER = 'html';
 
 const BOOLEAN_ATTRIBUTES = new Set([
-    'disabled',
-    'checked',
-    'readonly',
-    'required',
-    'selected',
-    'open',
-    'hidden'
+    'disabled', 'checked', 'selected', 'readonly', 'multiple',
+    'hidden', 'autofocus', 'required', 'open'
 ]);
+
+const STRICT_MEMBER_CHAIN_LITERAL_RE = /^(?:true|false|null|undefined|[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*)$/;
+const UNSAFE_MEMBER_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+const COMPILED_LITERAL_CACHE = new Map();
 
 /**
  * Hydrate a pre-rendered DOM tree using explicit payload tables.
@@ -32,6 +44,7 @@ const BOOLEAN_ATTRIBUTES = new Set([
  *   markers: Array<{ index: number, kind: 'text' | 'attr' | 'event', selector: string, attr?: string }>,
  *   events: Array<{ index: number, event: string, selector: string }>,
  *   state_values: Array<*>,
+ *   state_keys?: Array<string>,
  *   signals: Array<{ id: number, kind: 'signal', state_index: number }>,
  *   components?: Array<{ instance: string, selector: string, create: Function }>
  * }} payload
@@ -39,165 +52,258 @@ const BOOLEAN_ATTRIBUTES = new Set([
  */
 export function hydrate(payload) {
     cleanup();
+    try {
+        const normalized = _validatePayload(payload);
+        _deepFreezePayload(payload);
+        const { root, expressions, markers, events, stateValues, stateKeys, signals, components, route, params, ssrData, props } = normalized;
 
-    const normalized = _validatePayload(payload);
-    const { root, expressions, markers, events, stateValues, signals, components } = normalized;
+        const componentBindings = Object.create(null);
 
-    const componentBindings = Object.create(null);
-    const runtimeApi = Object.freeze({ signal, state, zeneffect });
-    for (let i = 0; i < components.length; i++) {
-        const component = components[i];
-        const hosts = _resolveNodes(root, component.selector, i, 'component');
-        for (let j = 0; j < hosts.length; j++) {
-            const instance = component.create(hosts[j], Object.freeze({}), runtimeApi);
-            if (!instance || typeof instance !== 'object') {
-                throw new Error(`[Zenith Runtime] component factory for ${component.instance} must return an object`);
+        const signalMap = new Map();
+        for (let i = 0; i < signals.length; i++) {
+            const signalDescriptor = signals[i];
+            const candidate = stateValues[signalDescriptor.state_index];
+            if (!candidate || typeof candidate !== 'object') {
+                throw new Error(`[Zenith Runtime] signal id ${signalDescriptor.id} did not resolve to an object`);
             }
-            if (typeof instance.mount === 'function') {
-                instance.mount();
+            if (typeof candidate.get !== 'function' || typeof candidate.subscribe !== 'function') {
+                throw new Error(`[Zenith Runtime] signal id ${signalDescriptor.id} must expose get() and subscribe()`);
             }
-            if (typeof instance.destroy === 'function') {
-                _registerDisposer(() => instance.destroy());
+            signalMap.set(i, candidate);
+        }
+
+        for (let i = 0; i < components.length; i++) {
+            const component = components[i];
+            const resolvedProps = Object.freeze(_resolveComponentProps(component.props || [], signalMap, {
+                component: component.instance,
+                route
+            }));
+            const hosts = _resolveNodes(root, component.selector, i, 'component');
+            for (let j = 0; j < hosts.length; j++) {
+                const componentScope = createSideEffectScope(`${component.instance}:${j}`);
+                const runtimeApi = {
+                    signal,
+                    state,
+                    zeneffect(effect, dependenciesOrOptions) {
+                        return zeneffect(effect, dependenciesOrOptions, componentScope);
+                    },
+                    zenEffect(effect, options) {
+                        return zenEffect(effect, options, componentScope);
+                    },
+                    zenMount(callback) {
+                        return zenMount(callback, componentScope);
+                    }
+                };
+                const instance = component.create(hosts[j], resolvedProps, runtimeApi);
+                if (!instance || typeof instance !== 'object') {
+                    throw new Error(`[Zenith Runtime] component factory for ${component.instance} must return an object`);
+                }
+                if (typeof instance.mount === 'function') {
+                    instance.mount();
+                }
+                activateSideEffectScope(componentScope);
+                _registerDisposer(() => {
+                    disposeSideEffectScope(componentScope);
+                    if (typeof instance.destroy === 'function') {
+                        instance.destroy();
+                    }
+                });
+                if (instance.bindings && typeof instance.bindings === 'object') {
+                    componentBindings[component.instance] = instance.bindings;
+                }
             }
-            if (instance.bindings && typeof instance.bindings === 'object') {
-                componentBindings[component.instance] = instance.bindings;
+        }
+
+        const expressionMarkerIndices = new Set();
+        for (let i = 0; i < expressions.length; i++) {
+            const expression = expressions[i];
+            if (expressionMarkerIndices.has(expression.marker_index)) {
+                throw new Error(`[Zenith Runtime] duplicate expression marker_index ${expression.marker_index}`);
+            }
+            expressionMarkerIndices.add(expression.marker_index);
+        }
+
+        const markerByIndex = new Map();
+        const markerNodesByIndex = new Map();
+        const markerIndices = new Set();
+        for (let i = 0; i < markers.length; i++) {
+            const marker = markers[i];
+            if (markerIndices.has(marker.index)) {
+                throw new Error(`[Zenith Runtime] duplicate marker index ${marker.index}`);
+            }
+            markerIndices.add(marker.index);
+            markerByIndex.set(marker.index, marker);
+
+            if (marker.kind === 'event') {
+                continue;
+            }
+
+            const nodes = _resolveNodes(root, marker.selector, marker.index, marker.kind);
+            markerNodesByIndex.set(marker.index, nodes);
+            const value = _evaluateExpression(
+                expressions[marker.index],
+                stateValues,
+                stateKeys,
+                signalMap,
+                componentBindings,
+                params,
+                ssrData,
+                marker.kind,
+                props
+            );
+            _applyMarkerValue(nodes, marker, value);
+        }
+
+        for (let i = 0; i < expressions.length; i++) {
+            if (!markerIndices.has(i)) {
+                throw new Error(`[Zenith Runtime] missing marker index ${i}`);
             }
         }
-    }
 
-    const signalMap = new Map();
-    const signalIds = new Set();
-    for (let i = 0; i < signals.length; i++) {
-        const signalDescriptor = signals[i];
-        if (signalIds.has(signalDescriptor.id)) {
-            throw new Error(`[Zenith Runtime] duplicate signal id ${signalDescriptor.id}`);
-        }
-        signalIds.add(signalDescriptor.id);
-
-        const candidate = stateValues[signalDescriptor.state_index];
-        if (!candidate || typeof candidate !== 'object') {
-            throw new Error(`[Zenith Runtime] signal id ${signalDescriptor.id} did not resolve to an object`);
-        }
-        if (typeof candidate.get !== 'function' || typeof candidate.subscribe !== 'function') {
-            throw new Error(`[Zenith Runtime] signal id ${signalDescriptor.id} must expose get() and subscribe()`);
-        }
-        signalMap.set(signalDescriptor.id, candidate);
-    }
-
-    const expressionMarkerIndices = new Set();
-    for (let i = 0; i < expressions.length; i++) {
-        const expression = expressions[i];
-        if (expressionMarkerIndices.has(expression.marker_index)) {
-            throw new Error(`[Zenith Runtime] duplicate expression marker_index ${expression.marker_index}`);
-        }
-        expressionMarkerIndices.add(expression.marker_index);
-    }
-
-    const markerByIndex = new Map();
-    const markerNodesByIndex = new Map();
-    const markerIndices = new Set();
-    for (let i = 0; i < markers.length; i++) {
-        const marker = markers[i];
-        if (markerIndices.has(marker.index)) {
-            throw new Error(`[Zenith Runtime] duplicate marker index ${marker.index}`);
-        }
-        markerIndices.add(marker.index);
-        markerByIndex.set(marker.index, marker);
-
-        if (marker.kind === 'event') {
-            continue;
-        }
-
-        const nodes = _resolveNodes(root, marker.selector, marker.index, marker.kind);
-        markerNodesByIndex.set(marker.index, nodes);
-        const value = _evaluateExpression(
-            expressions[marker.index],
-            stateValues,
-            signalMap,
-            componentBindings,
-            marker.kind
-        );
-        _applyMarkerValue(nodes, marker, value);
-    }
-
-    for (let i = 0; i < expressions.length; i++) {
-        if (!markerIndices.has(i)) {
-            throw new Error(`[Zenith Runtime] missing marker index ${i}`);
-        }
-    }
-
-    function renderMarkerByIndex(index) {
-        const marker = markerByIndex.get(index);
-        if (!marker || marker.kind === 'event') {
-            return;
-        }
-        const nodes = markerNodesByIndex.get(index) || _resolveNodes(root, marker.selector, marker.index, marker.kind);
-        markerNodesByIndex.set(index, nodes);
-        const value = _evaluateExpression(
-            expressions[index],
-            stateValues,
-            signalMap,
-            componentBindings,
-            marker.kind
-        );
-        _applyMarkerValue(nodes, marker, value);
-    }
-
-    const dependentMarkersBySignal = new Map();
-    for (let i = 0; i < expressions.length; i++) {
-        const expression = expressions[i];
-        if (!Number.isInteger(expression.signal_index)) {
-            continue;
-        }
-        if (!dependentMarkersBySignal.has(expression.signal_index)) {
-            dependentMarkersBySignal.set(expression.signal_index, []);
-        }
-        dependentMarkersBySignal.get(expression.signal_index).push(expression.marker_index);
-    }
-
-    for (const [signalId, markerIndexes] of dependentMarkersBySignal.entries()) {
-        const targetSignal = signalMap.get(signalId);
-        if (!targetSignal) {
-            throw new Error(`[Zenith Runtime] expression references unknown signal id ${signalId}`);
-        }
-        const unsubscribe = targetSignal.subscribe(() => {
-            for (let i = 0; i < markerIndexes.length; i++) {
-                renderMarkerByIndex(markerIndexes[i]);
+        function renderMarkerByIndex(index) {
+            const marker = markerByIndex.get(index);
+            if (!marker || marker.kind === 'event') {
+                return;
             }
+            const nodes = markerNodesByIndex.get(index) || _resolveNodes(root, marker.selector, marker.index, marker.kind);
+            markerNodesByIndex.set(index, nodes);
+            const value = _evaluateExpression(
+                expressions[index],
+                stateValues,
+                stateKeys,
+                signalMap,
+                componentBindings,
+                params,
+                ssrData,
+                marker.kind,
+                props
+            );
+            _applyMarkerValue(nodes, marker, value);
+        }
+
+        const dependentMarkersBySignal = new Map();
+        for (let i = 0; i < expressions.length; i++) {
+            const expression = expressions[i];
+            if (!Number.isInteger(expression.signal_index)) {
+                continue;
+            }
+            if (!dependentMarkersBySignal.has(expression.signal_index)) {
+                dependentMarkersBySignal.set(expression.signal_index, []);
+            }
+            dependentMarkersBySignal.get(expression.signal_index).push(expression.marker_index);
+        }
+
+        for (const [signalId, markerIndexes] of dependentMarkersBySignal.entries()) {
+            const targetSignal = signalMap.get(signalId);
+            if (!targetSignal) {
+                throw new Error(`[Zenith Runtime] expression references unknown signal id ${signalId}`);
+            }
+            const unsubscribe = targetSignal.subscribe(() => {
+                for (let i = 0; i < markerIndexes.length; i++) {
+                    renderMarkerByIndex(markerIndexes[i]);
+                }
+            });
+            if (typeof unsubscribe === 'function') {
+                _registerDisposer(unsubscribe);
+            }
+        }
+
+        const dependentMarkersByComponentSignal = new Map();
+        for (let i = 0; i < expressions.length; i++) {
+            const expression = expressions[i];
+            if (!expression || typeof expression !== 'object') {
+                continue;
+            }
+            if (typeof expression.component_instance !== 'string' || typeof expression.component_binding !== 'string') {
+                continue;
+            }
+            const instanceBindings = componentBindings[expression.component_instance];
+            const candidate =
+                instanceBindings && Object.prototype.hasOwnProperty.call(instanceBindings, expression.component_binding)
+                    ? instanceBindings[expression.component_binding]
+                    : undefined;
+            if (!candidate || typeof candidate !== 'object') {
+                continue;
+            }
+            if (typeof candidate.get !== 'function' || typeof candidate.subscribe !== 'function') {
+                continue;
+            }
+            if (!dependentMarkersByComponentSignal.has(candidate)) {
+                dependentMarkersByComponentSignal.set(candidate, []);
+            }
+            dependentMarkersByComponentSignal.get(candidate).push(expression.marker_index);
+        }
+
+        for (const [componentSignal, markerIndexes] of dependentMarkersByComponentSignal.entries()) {
+            const unsubscribe = componentSignal.subscribe(() => {
+                for (let i = 0; i < markerIndexes.length; i++) {
+                    renderMarkerByIndex(markerIndexes[i]);
+                }
+            });
+            if (typeof unsubscribe === 'function') {
+                _registerDisposer(unsubscribe);
+            }
+        }
+
+        const eventIndices = new Set();
+        for (let i = 0; i < events.length; i++) {
+            const eventBinding = events[i];
+            if (eventIndices.has(eventBinding.index)) {
+                throw new Error(`[Zenith Runtime] duplicate event index ${eventBinding.index}`);
+            }
+            eventIndices.add(eventBinding.index);
+
+            const nodes = _resolveNodes(root, eventBinding.selector, eventBinding.index, 'event');
+            const handler = _evaluateExpression(
+                expressions[eventBinding.index],
+                stateValues,
+                stateKeys,
+                signalMap,
+                componentBindings,
+                params,
+                ssrData,
+                'event'
+            );
+            if (typeof handler !== 'function') {
+                throwZenithRuntimeError({
+                    phase: 'bind',
+                    code: 'BINDING_APPLY_FAILED',
+                    message: `Event binding at index ${eventBinding.index} did not resolve to a function`,
+                    marker: { type: `data-zx-on-${eventBinding.event}`, id: eventBinding.index },
+                    path: `event[${eventBinding.index}].${eventBinding.event}`,
+                    hint: 'Bind events to function references (on:click={handler}).'
+                });
+            }
+
+            for (let j = 0; j < nodes.length; j++) {
+                const node = nodes[j];
+                const wrappedHandler = function zenithEventHandler(event) {
+                    try {
+                        return handler.call(this, event);
+                    } catch (error) {
+                        rethrowZenithRuntimeError(error, {
+                            phase: 'event',
+                            code: 'EVENT_HANDLER_FAILED',
+                            message: `Event handler failed for "${eventBinding.event}"`,
+                            marker: { type: `data-zx-on-${eventBinding.event}`, id: eventBinding.index },
+                            path: `event[${eventBinding.index}].${eventBinding.event}`,
+                            hint: 'Inspect the handler body and referenced state.'
+                        });
+                    }
+                };
+                node.addEventListener(eventBinding.event, wrappedHandler);
+                _registerListener(node, eventBinding.event, wrappedHandler);
+            }
+        }
+
+        return cleanup;
+    } catch (error) {
+        rethrowZenithRuntimeError(error, {
+            phase: 'hydrate',
+            code: 'BINDING_APPLY_FAILED',
+            hint: 'Inspect marker tables, expression bindings, and the runtime overlay diagnostics.'
         });
-        if (typeof unsubscribe === 'function') {
-            _registerDisposer(unsubscribe);
-        }
     }
-
-    const eventIndices = new Set();
-    for (let i = 0; i < events.length; i++) {
-        const eventBinding = events[i];
-        if (eventIndices.has(eventBinding.index)) {
-            throw new Error(`[Zenith Runtime] duplicate event index ${eventBinding.index}`);
-        }
-        eventIndices.add(eventBinding.index);
-
-        const nodes = _resolveNodes(root, eventBinding.selector, eventBinding.index, 'event');
-        const handler = _evaluateExpression(
-            expressions[eventBinding.index],
-            stateValues,
-            signalMap,
-            componentBindings,
-            'event'
-        );
-        if (typeof handler !== 'function') {
-            throw new Error(`[Zenith Runtime] event binding at index ${eventBinding.index} did not resolve to a function`);
-        }
-
-        for (let j = 0; j < nodes.length; j++) {
-            const node = nodes[j];
-            node.addEventListener(eventBinding.event, handler);
-            _registerListener(node, eventBinding.event, handler);
-        }
-    }
-
-    return cleanup;
 }
 
 function _validatePayload(payload) {
@@ -234,6 +340,15 @@ function _validatePayload(payload) {
     if (!Array.isArray(stateValues)) {
         throw new Error('[Zenith Runtime] hydrate(payload) requires state_values[]');
     }
+    const stateKeys = Array.isArray(payload.state_keys) ? payload.state_keys : [];
+    if (!Array.isArray(stateKeys)) {
+        throw new Error('[Zenith Runtime] hydrate(payload) requires state_keys[] when provided');
+    }
+    for (let i = 0; i < stateKeys.length; i++) {
+        if (typeof stateKeys[i] !== 'string') {
+            throw new Error(`[Zenith Runtime] state_keys[${i}] must be a string`);
+        }
+    }
 
     const signals = payload.signals;
     if (!Array.isArray(signals)) {
@@ -241,6 +356,15 @@ function _validatePayload(payload) {
     }
 
     const components = Array.isArray(payload.components) ? payload.components : [];
+    const route = typeof payload.route === 'string' && payload.route.length > 0
+        ? payload.route
+        : '<unknown>';
+    const params = payload.params && typeof payload.params === 'object'
+        ? payload.params
+        : {};
+    const ssrData = payload.ssr_data && typeof payload.ssr_data === 'object'
+        ? payload.ssr_data
+        : {};
 
     if (markers.length !== expressions.length) {
         throw new Error(
@@ -312,6 +436,9 @@ function _validatePayload(payload) {
         if (!Number.isInteger(signalDescriptor.id) || signalDescriptor.id < 0) {
             throw new Error(`[Zenith Runtime] signal descriptor at position ${i} requires non-negative id`);
         }
+        if (signalDescriptor.id !== i) {
+            throw new Error(`[Zenith Runtime] signal table out of order at position ${i}: id=${signalDescriptor.id}`);
+        }
         if (!Number.isInteger(signalDescriptor.state_index) || signalDescriptor.state_index < 0 || signalDescriptor.state_index >= stateValues.length) {
             throw new Error(`[Zenith Runtime] signal descriptor at position ${i} has out-of-bounds state_index`);
         }
@@ -333,18 +460,123 @@ function _validatePayload(payload) {
         }
     }
 
-    return { root, expressions, markers, events, stateValues, signals, components };
+    if (payload.params !== undefined) {
+        if (!payload.params || typeof payload.params !== 'object' || Array.isArray(payload.params)) {
+            throw new Error('[Zenith Runtime] hydrate() requires params object');
+        }
+    }
+
+    if (payload.ssr_data !== undefined) {
+        if (!payload.ssr_data || typeof payload.ssr_data !== 'object' || Array.isArray(payload.ssr_data)) {
+            throw new Error('[Zenith Runtime] hydrate() requires ssr_data object');
+        }
+    }
+
+    const props = payload.props && typeof payload.props === 'object' && !Array.isArray(payload.props)
+        ? payload.props
+        : {};
+    for (let i = 0; i < expressions.length; i++) Object.freeze(expressions[i]);
+    for (let i = 0; i < markers.length; i++) Object.freeze(markers[i]);
+    for (let i = 0; i < events.length; i++) Object.freeze(events[i]);
+    for (let i = 0; i < signals.length; i++) Object.freeze(signals[i]);
+    for (let i = 0; i < components.length; i++) {
+        const c = components[i];
+        if (Array.isArray(c.props)) {
+            for (let j = 0; j < c.props.length; j++) {
+                const propDesc = c.props[j];
+                if (propDesc && typeof propDesc === 'object' && propDesc.value && typeof propDesc.value === 'object') {
+                    Object.freeze(propDesc.value);
+                }
+                Object.freeze(propDesc);
+            }
+            Object.freeze(c.props);
+        }
+        Object.freeze(c);
+    }
+
+    Object.freeze(expressions);
+    Object.freeze(markers);
+    Object.freeze(events);
+    Object.freeze(signals);
+    Object.freeze(components);
+
+    const validatedPayload = {
+        root,
+        expressions,
+        markers,
+        events,
+        stateValues,
+        stateKeys,
+        signals,
+        components,
+        route,
+        params: Object.freeze(params),
+        ssrData: Object.freeze(ssrData),
+        props: Object.freeze(props)
+    };
+
+    return Object.freeze(validatedPayload);
+}
+
+function _resolveComponentProps(propTable, signalMap, context = {}) {
+    if (!Array.isArray(propTable)) {
+        throw new Error('[Zenith Runtime] component props must be an array');
+    }
+    const resolved = Object.create(null);
+    for (let i = 0; i < propTable.length; i++) {
+        const descriptor = propTable[i];
+        if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+            throw new Error(`[Zenith Runtime] component prop descriptor at index ${i} must be an object`);
+        }
+        if (typeof descriptor.name !== 'string' || descriptor.name.length === 0) {
+            throw new Error(`[Zenith Runtime] component prop descriptor at index ${i} requires non-empty name`);
+        }
+        if (Object.prototype.hasOwnProperty.call(resolved, descriptor.name)) {
+            throw new Error(`[Zenith Runtime] duplicate component prop "${descriptor.name}"`);
+        }
+        if (descriptor.type === 'static') {
+            if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+                throw new Error(`[Zenith Runtime] component prop "${descriptor.name}" static value is missing`);
+            }
+            resolved[descriptor.name] = descriptor.value;
+            continue;
+        }
+        if (descriptor.type === 'signal') {
+            if (!Number.isInteger(descriptor.index)) {
+                throw new Error(`[Zenith Runtime] component prop "${descriptor.name}" signal index must be an integer`);
+            }
+            const signalValue = signalMap.get(descriptor.index);
+            if (!signalValue || typeof signalValue.get !== 'function') {
+                throw new Error(
+                    `[Zenith Runtime]\nComponent: ${context.component || '<unknown>'}\nRoute: ${context.route || '<unknown>'}\nProp: ${descriptor.name}\nReason: signal index ${descriptor.index} did not resolve`
+                );
+            }
+            resolved[descriptor.name] = signalValue;
+            continue;
+        }
+        throw new Error(
+            `[Zenith Runtime] unsupported component prop type "${descriptor.type}" for "${descriptor.name}"`
+        );
+    }
+    return resolved;
 }
 
 function _resolveNodes(root, selector, index, kind) {
     const nodes = root.querySelectorAll(selector);
     if (!nodes || nodes.length === 0) {
-        throw new Error(`[Zenith Runtime] unresolved ${kind} marker index ${index} for selector "${selector}"`);
+        throwZenithRuntimeError({
+            phase: 'bind',
+            code: 'MARKER_MISSING',
+            message: `Unresolved ${kind} marker index ${index}`,
+            marker: { type: kind, id: index },
+            path: `selector:${selector}`,
+            hint: 'Confirm SSR marker attributes and runtime selector tables match.'
+        });
     }
     return nodes;
 }
 
-function _evaluateExpression(binding, stateValues, signalMap, componentBindings, mode) {
+function _evaluateExpression(binding, stateValues, stateKeys, signalMap, componentBindings, params, ssrData, mode, props) {
     if (binding.signal_index !== null && binding.signal_index !== undefined) {
         const signalValue = signalMap.get(binding.signal_index);
         if (!signalValue || typeof signalValue.get !== 'function') {
@@ -355,6 +587,14 @@ function _evaluateExpression(binding, stateValues, signalMap, componentBindings,
 
     if (binding.state_index !== null && binding.state_index !== undefined) {
         const resolved = stateValues[binding.state_index];
+        if (
+            mode !== 'event' &&
+            resolved &&
+            typeof resolved === 'object' &&
+            typeof resolved.get === 'function'
+        ) {
+            return resolved.get();
+        }
         if (mode !== 'event' && typeof resolved === 'function') {
             return resolved();
         }
@@ -367,6 +607,14 @@ function _evaluateExpression(binding, stateValues, signalMap, componentBindings,
             instanceBindings && Object.prototype.hasOwnProperty.call(instanceBindings, binding.component_binding)
                 ? instanceBindings[binding.component_binding]
                 : undefined;
+        if (
+            mode !== 'event' &&
+            resolved &&
+            typeof resolved === 'object' &&
+            typeof resolved.get === 'function'
+        ) {
+            return resolved.get();
+        }
         if (mode !== 'event' && typeof resolved === 'function') {
             return resolved();
         }
@@ -374,32 +622,915 @@ function _evaluateExpression(binding, stateValues, signalMap, componentBindings,
     }
 
     if (binding.literal !== null && binding.literal !== undefined) {
+        if (typeof binding.literal === 'string') {
+            const trimmedLiteral = binding.literal.trim();
+            const strictMemberValue = _resolveStrictMemberChainLiteral(
+                trimmedLiteral,
+                stateValues,
+                stateKeys,
+                params,
+                ssrData,
+                mode,
+                props,
+                binding.marker_index
+            );
+            if (strictMemberValue !== UNRESOLVED_LITERAL) {
+                return strictMemberValue;
+            }
+            if (trimmedLiteral === 'data' || trimmedLiteral === 'ssr') {
+                return ssrData;
+            }
+            if (trimmedLiteral === 'params') {
+                return params;
+            }
+            if (trimmedLiteral === 'props') {
+                return props || {};
+            }
+
+            const evaluated = _evaluateLiteralExpression(
+                trimmedLiteral,
+                stateValues,
+                stateKeys,
+                params,
+                ssrData,
+                mode,
+                props
+            );
+            if (evaluated !== UNRESOLVED_LITERAL) {
+                return evaluated;
+            }
+            if (_isLikelyExpressionLiteral(trimmedLiteral)) {
+                throwZenithRuntimeError({
+                    phase: 'bind',
+                    code: 'UNRESOLVED_EXPRESSION',
+                    message: `Failed to resolve expression literal: ${_truncateLiteralForError(trimmedLiteral)}`,
+                    marker: {
+                        type: _markerTypeForError(mode),
+                        id: binding.marker_index
+                    },
+                    path: `expression[${binding.marker_index}]`,
+                    hint: 'Ensure the expression references declared state keys or params/data bindings.'
+                });
+            }
+        }
         return binding.literal;
     }
 
     return '';
 }
 
-function _applyMarkerValue(nodes, marker, value) {
-    for (let i = 0; i < nodes.length; i++) {
-        const node = nodes[i];
-        if (marker.kind === 'text') {
-            node.textContent = _coerceText(value);
+function _throwUnresolvedMemberChainError(literal, markerIndex, mode, pathSuffix, hint) {
+    throwZenithRuntimeError({
+        phase: 'bind',
+        code: 'UNRESOLVED_EXPRESSION',
+        message: `Failed to resolve expression literal: ${_truncateLiteralForError(literal)}`,
+        marker: {
+            type: _markerTypeForError(mode),
+            id: markerIndex
+        },
+        path: `marker[${markerIndex}].${pathSuffix}`,
+        hint
+    });
+}
+
+function _resolveStrictMemberChainLiteral(
+    literal,
+    stateValues,
+    stateKeys,
+    params,
+    ssrData,
+    mode,
+
+    props,
+    markerIndex
+) {
+    if (typeof literal !== 'string' || !STRICT_MEMBER_CHAIN_LITERAL_RE.test(literal)) {
+        return UNRESOLVED_LITERAL;
+    }
+
+    if (literal === 'true') return true;
+    if (literal === 'false') return false;
+    if (literal === 'null') return null;
+    if (literal === 'undefined') return undefined;
+
+    const segments = literal.split('.');
+    const baseIdentifier = segments[0];
+    const scope = _buildLiteralScope(stateValues, stateKeys, params, ssrData, mode, props);
+
+    if (!Object.prototype.hasOwnProperty.call(scope, baseIdentifier)) {
+        _throwUnresolvedMemberChainError(
+            literal,
+            markerIndex,
+            mode,
+            `expression.${baseIdentifier}`,
+            `Base identifier "${baseIdentifier}" is not bound. Check props/data/params and declared state keys.`
+        );
+    }
+
+    let cursor = scope[baseIdentifier];
+    let traversedPath = baseIdentifier;
+
+    for (let i = 1; i < segments.length; i++) {
+        const segment = segments[i];
+        if (UNSAFE_MEMBER_KEYS.has(segment)) {
+            throwZenithRuntimeError({
+                phase: 'bind',
+                code: 'UNSAFE_MEMBER_ACCESS',
+                message: `Blocked unsafe member access: ${segment} in path "${literal}"`,
+                path: `marker[${markerIndex}].expression.${literal}`,
+                hint: 'Property access to __proto__, prototype, and constructor is forbidden.'
+            });
+        }
+
+        if (cursor === null || cursor === undefined) {
+            _throwUnresolvedMemberChainError(
+                literal,
+                markerIndex,
+                mode,
+                `expression.${traversedPath}.${segment}`,
+                `Cannot read "${segment}" from ${traversedPath} because it is null or undefined.`
+            );
+        }
+
+        const cursorType = typeof cursor;
+        if (cursorType !== 'object' && cursorType !== 'function') {
+            _throwUnresolvedMemberChainError(
+                literal,
+                markerIndex,
+                mode,
+                `expression.${traversedPath}.${segment}`,
+                `Cannot read "${segment}" from ${traversedPath} because it resolved to a ${cursorType}.`
+            );
+        }
+
+        if (!Object.prototype.hasOwnProperty.call(cursor, segment)) {
+            _throwUnresolvedMemberChainError(
+                literal,
+                markerIndex,
+                mode,
+                `expression.${traversedPath}.${segment}`,
+                `Missing member "${segment}" on ${traversedPath}. Check your bindings.`
+            );
+        }
+
+        cursor = cursor[segment];
+        traversedPath = `${traversedPath}.${segment}`;
+    }
+
+    return cursor;
+}
+
+function _evaluateLiteralExpression(expression, stateValues, stateKeys, params, ssrData, mode, props) {
+    const scope = _buildLiteralScope(stateValues, stateKeys, params, ssrData, mode, props);
+    const scopeKeys = Object.keys(scope);
+    const scopeValues = scopeKeys.map((key) => scope[key]);
+    const rewritten = _rewriteMarkupLiterals(expression);
+    const cacheKey = `${scopeKeys.join('|')}::${rewritten}`;
+
+    let evaluator = COMPILED_LITERAL_CACHE.get(cacheKey);
+    if (!evaluator) {
+        try {
+            evaluator = Function(
+                ...scopeKeys,
+                `return (${rewritten});`
+            );
+        } catch (err) {
+            if (isZenithRuntimeError(err)) throw err;
+            return UNRESOLVED_LITERAL;
+        }
+        COMPILED_LITERAL_CACHE.set(cacheKey, evaluator);
+    }
+
+    try {
+        return evaluator(...scopeValues);
+    } catch (err) {
+        if (isZenithRuntimeError(err)) throw err;
+        return UNRESOLVED_LITERAL;
+    }
+}
+
+function _buildLiteralScope(stateValues, stateKeys, params, ssrData, mode, props) {
+    const scope = Object.create(null);
+    scope.params = params;
+    scope.data = ssrData;
+    scope.ssr = ssrData;
+    scope.props = props || {};
+    scope.__ZENITH_INTERNAL_ZENHTML = _zenhtml;
+    scope.__zenith_fragment = function __zenith_fragment(html) {
+        return {
+            __zenith_fragment: true,
+            html: html === null || html === undefined || html === false ? '' : String(html)
+        };
+    };
+    scope[LEGACY_MARKUP_HELPER] = function legacyMarkup(strings, ...values) {
+        if (!Array.isArray(strings)) {
+            return scope.__zenith_fragment(strings);
+        }
+        let html = '';
+        for (let i = 0; i < strings.length; i++) {
+            html += strings[i];
+            if (i < values.length) {
+                html += _renderLegacyMarkupInterpolation(values[i]);
+            }
+        }
+        return scope.__zenith_fragment(html);
+    };
+    const aliasConflicts = new Set();
+
+    if (Array.isArray(stateKeys)) {
+        for (let i = 0; i < stateKeys.length; i++) {
+            const key = stateKeys[i];
+            if (typeof key !== 'string' || key.length === 0) {
+                continue;
+            }
+            if (Object.prototype.hasOwnProperty.call(scope, key)) {
+                continue;
+            }
+            const value = stateValues[i];
+            scope[key] = value;
+
+            const alias = _deriveStateAlias(key);
+            if (!alias || alias === key || aliasConflicts.has(alias)) {
+                continue;
+            }
+            if (Object.prototype.hasOwnProperty.call(scope, alias)) {
+                delete scope[alias];
+                aliasConflicts.add(alias);
+                continue;
+            }
+            scope[alias] = scope[key];
+        }
+    }
+
+    return scope;
+}
+
+function _deriveStateAlias(key) {
+    if (typeof key !== 'string' || key.length === 0) {
+        return null;
+    }
+    if (!key.startsWith('__')) {
+        return null;
+    }
+    if (key.startsWith('__z_frag_')) {
+        return null;
+    }
+    const segments = key.split('_').filter(Boolean);
+    for (let i = segments.length - 1; i >= 0; i--) {
+        const candidate = segments[i];
+        if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(candidate)) {
+            return candidate === key ? null : candidate;
+        }
+    }
+    const match = key.match(/([A-Za-z_$][A-Za-z0-9_$]*)$/);
+    if (!match) {
+        return null;
+    }
+    const alias = match[1];
+    return alias === key ? null : alias;
+}
+
+function _isLikelyExpressionLiteral(literal) {
+    if (typeof literal !== 'string') {
+        return false;
+    }
+    const trimmed = literal.trim();
+    if (trimmed.length === 0) {
+        return false;
+    }
+    if (trimmed === 'true' || trimmed === 'false' || trimmed === 'null' || trimmed === 'undefined') {
+        return false;
+    }
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(trimmed)) {
+        return true;
+    }
+    return /=>|[()[\]{}<>=?:.+\-*/%|&!]/.test(trimmed);
+}
+
+function _markerTypeForError(kind) {
+    if (kind === 'text') return 'data-zx-e';
+    if (kind === 'attr') return 'data-zx-attr';
+    if (kind === 'event') return 'data-zx-on';
+    return kind;
+}
+
+function _truncateLiteralForError(str) {
+    if (typeof str !== 'string') return String(str);
+    const sanitized = str
+        .replace(/[A-Za-z]:\\[^\s"'`]+/g, '<path>')
+        .replace(/\/Users\/[^\s"'`]+/g, '<path>')
+        .replace(/\/home\/[^\s"'`]+/g, '<path>')
+        .replace(/\/private\/[^\s"'`]+/g, '<path>')
+        .replace(/\/tmp\/[^\s"'`]+/g, '<path>')
+        .replace(/\/var\/folders\/[^\s"'`]+/g, '<path>');
+    return sanitized.length > 100 ? `${sanitized.substring(0, 97)}...` : sanitized;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// _zenhtml — LEGACY internal helper for compiler-generated fragment expressions.
+//
+// This function is intentionally NOT exported. It is bound into the evaluator
+// scope under __ZENITH_INTERNAL_ZENHTML so only compiler-emitted literals can
+// reach it. Sanitization happens ONLY inside this helper; existing innerHTML
+// sites used for explicit innerHTML={…} bindings are NOT affected.
+//
+// Scheduled for removal before 1.0 (replaced by full fragment protocol).
+// ──────────────────────────────────────────────────────────────────────────────
+
+const _ZENHTML_UNSAFE_TAG_RE = /<script[\s>]/i;
+const _ZENHTML_EVENT_ATTR_RE = /\bon[a-z]+\s*=/i;
+const _ZENHTML_JS_URL_RE = /javascript\s*:/i;
+const _ZENHTML_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const _ZENHTML_SCRIPT_CLOSE_RE = /<\/script/gi;
+
+function _zenhtml(strings, ...values) {
+    if (!Array.isArray(strings)) {
+        throwZenithRuntimeError({
+            phase: 'render',
+            code: 'NON_RENDERABLE_VALUE',
+            message: '__ZENITH_INTERNAL_ZENHTML must be called as a tagged template literal',
+            hint: 'This helper only accepts tagged template syntax.'
+        });
+    }
+
+    let result = '';
+    for (let i = 0; i < strings.length; i++) {
+        result += strings[i];
+        if (i < values.length) {
+            const val = values[i];
+            result += _zenhtml_coerce(val, i);
+        }
+    }
+
+    // Final output sanitization: reject dangerous patterns in assembled HTML
+    if (_ZENHTML_UNSAFE_TAG_RE.test(result)) {
+        throwZenithRuntimeError({
+            phase: 'render',
+            code: 'NON_RENDERABLE_VALUE',
+            message: 'Embedded markup expression contains forbidden <script> tag',
+            hint: 'Script tags are not allowed in embedded markup expressions.'
+        });
+    }
+    if (_ZENHTML_EVENT_ATTR_RE.test(result)) {
+        throwZenithRuntimeError({
+            phase: 'render',
+            code: 'NON_RENDERABLE_VALUE',
+            message: 'Embedded markup expression contains inline event handler (on*=)',
+            hint: 'Use on:event={handler} bindings instead of inline event attributes.'
+        });
+    }
+    if (_ZENHTML_JS_URL_RE.test(result)) {
+        throwZenithRuntimeError({
+            phase: 'render',
+            code: 'NON_RENDERABLE_VALUE',
+            message: 'Embedded markup expression contains javascript: URL',
+            hint: 'javascript: URLs are forbidden in embedded markup.'
+        });
+    }
+
+    // Escape any residual </script sequences
+    result = result.replace(_ZENHTML_SCRIPT_CLOSE_RE, '<\\/script');
+
+    return {
+        __zenith_fragment: true,
+        html: result
+    };
+}
+
+function _zenhtml_coerce(val, interpolationIndex) {
+    if (val === null || val === undefined || val === false) {
+        return '';
+    }
+    if (val === true) {
+        return '';
+    }
+    if (typeof val === 'string') {
+        return val;
+    }
+    if (typeof val === 'number') {
+        return String(val);
+    }
+    if (typeof val === 'object' && val.__zenith_fragment === true && typeof val.html === 'string') {
+        return val.html;
+    }
+    if (Array.isArray(val)) {
+        let out = '';
+        for (let j = 0; j < val.length; j++) {
+            out += _zenhtml_coerce(val[j], interpolationIndex);
+        }
+        return out;
+    }
+    if (typeof val === 'object') {
+        // Check for prototype pollution keys
+        const keys = Object.keys(val);
+        for (let k = 0; k < keys.length; k++) {
+            if (_ZENHTML_PROTO_KEYS.has(keys[k])) {
+                throwZenithRuntimeError({
+                    phase: 'render',
+                    code: 'NON_RENDERABLE_VALUE',
+                    message: `Embedded markup interpolation[${interpolationIndex}] contains forbidden key "${keys[k]}"`,
+                    hint: 'Prototype pollution keys are forbidden in embedded markup expressions.'
+                });
+            }
+        }
+        throwZenithRuntimeError({
+            phase: 'render',
+            code: 'NON_RENDERABLE_VALUE',
+            message: `Embedded markup interpolation[${interpolationIndex}] resolved to a non-renderable object`,
+            hint: 'Only strings, numbers, booleans, null, undefined, arrays, and __zenith_fragment objects are allowed.'
+        });
+    }
+    // functions and symbols are not renderable
+    throwZenithRuntimeError({
+        phase: 'render',
+        code: 'NON_RENDERABLE_VALUE',
+        message: `Embedded markup interpolation[${interpolationIndex}] resolved to type "${typeof val}"`,
+        hint: 'Only strings, numbers, booleans, null, undefined, arrays, and __zenith_fragment objects are allowed.'
+    });
+}
+
+function _rewriteMarkupLiterals(expression) {
+    let out = '';
+    let index = 0;
+    let quote = null;
+    let escaped = false;
+
+    while (index < expression.length) {
+        const ch = expression[index];
+
+        if (quote) {
+            out += ch;
+            if (escaped) {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if (ch === '\\') {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if (ch === quote) {
+                quote = null;
+            }
+            index += 1;
             continue;
         }
 
-        if (marker.kind === 'attr') {
-            _applyAttribute(node, marker.attr, value);
+        if (ch === '\'' || ch === '"' || ch === '`') {
+            quote = ch;
+            out += ch;
+            index += 1;
+            continue;
+        }
+
+        if (ch === '<') {
+            const markup = _readMarkupLiteral(expression, index);
+            if (markup) {
+                out += `__zenith_fragment(${_markupLiteralToTemplate(markup.value)})`;
+                index = markup.end;
+                continue;
+            }
+        }
+
+        out += ch;
+        index += 1;
+    }
+
+    return out;
+}
+
+function _readMarkupLiteral(source, start) {
+    if (source[start] !== '<') {
+        return null;
+    }
+
+    const firstTag = _readTagToken(source, start);
+    if (!firstTag || firstTag.isClosing) {
+        return null;
+    }
+    if (firstTag.selfClosing) {
+        return {
+            value: source.slice(start, firstTag.end),
+            end: firstTag.end
+        };
+    }
+
+    const stack = [firstTag.name];
+    let cursor = firstTag.end;
+
+    while (cursor < source.length) {
+        const nextLt = source.indexOf('<', cursor);
+        if (nextLt < 0) {
+            return null;
+        }
+        const token = _readTagToken(source, nextLt);
+        if (!token) {
+            cursor = nextLt + 1;
+            continue;
+        }
+        cursor = token.end;
+
+        if (token.selfClosing) {
+            continue;
+        }
+
+        if (token.isClosing) {
+            const expected = stack[stack.length - 1];
+            if (token.name !== expected) {
+                return null;
+            }
+            stack.pop();
+            if (stack.length === 0) {
+                return {
+                    value: source.slice(start, token.end),
+                    end: token.end
+                };
+            }
+            continue;
+        }
+
+        stack.push(token.name);
+    }
+
+    return null;
+}
+
+function _readTagToken(source, start) {
+    if (source[start] !== '<') {
+        return null;
+    }
+    let index = start + 1;
+    let isClosing = false;
+
+    if (index < source.length && source[index] === '/') {
+        isClosing = true;
+        index += 1;
+    }
+
+    if (index >= source.length || !/[A-Za-z_]/.test(source[index])) {
+        return null;
+    }
+
+    const nameStart = index;
+    while (index < source.length && /[A-Za-z0-9:_-]/.test(source[index])) {
+        index += 1;
+    }
+    if (index === nameStart) {
+        return null;
+    }
+    const name = source.slice(nameStart, index);
+
+    let quote = null;
+    let escaped = false;
+    let braceDepth = 0;
+    while (index < source.length) {
+        const ch = source[index];
+        if (quote) {
+            if (escaped) {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if (ch === '\\') {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if (ch === quote) {
+                quote = null;
+            }
+            index += 1;
+            continue;
+        }
+
+        if (ch === '\'' || ch === '"' || ch === '`') {
+            quote = ch;
+            index += 1;
+            continue;
+        }
+        if (ch === '{') {
+            braceDepth += 1;
+            index += 1;
+            continue;
+        }
+        if (ch === '}') {
+            braceDepth = Math.max(0, braceDepth - 1);
+            index += 1;
+            continue;
+        }
+        if (ch === '>' && braceDepth === 0) {
+            const segment = source.slice(start, index + 1);
+            const selfClosing = !isClosing && /\/\s*>$/.test(segment);
+            return { name, isClosing, selfClosing, end: index + 1 };
+        }
+        index += 1;
+    }
+
+    return null;
+}
+
+function _markupLiteralToTemplate(markup) {
+    let out = '`';
+    let index = 0;
+    while (index < markup.length) {
+        const ch = markup[index];
+        if (ch === '{') {
+            const segment = _readBalancedBraces(markup, index);
+            if (segment) {
+                if (_isAttributeExpressionStart(markup, index)) {
+                    out += '"${' + segment.content + '}"';
+                } else {
+                    out += '${' + segment.content + '}';
+                }
+                index = segment.end;
+                continue;
+            }
+        }
+        if (ch === '`') {
+            out += '\\`';
+            index += 1;
+            continue;
+        }
+        if (ch === '\\') {
+            out += '\\\\';
+            index += 1;
+            continue;
+        }
+        if (ch === '$' && markup[index + 1] === '{') {
+            out += '\\${';
+            index += 2;
+            continue;
+        }
+        out += ch;
+        index += 1;
+    }
+    out += '`';
+    return out;
+}
+
+function _isAttributeExpressionStart(markup, start) {
+    let cursor = start - 1;
+    while (cursor >= 0) {
+        const ch = markup[cursor];
+        if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+            cursor -= 1;
+            continue;
+        }
+        return ch === '=';
+    }
+    return false;
+}
+
+function _readBalancedBraces(source, start) {
+    if (source[start] !== '{') {
+        return null;
+    }
+    let depth = 1;
+    let index = start + 1;
+    let quote = null;
+    let escaped = false;
+    let content = '';
+
+    while (index < source.length) {
+        const ch = source[index];
+        if (quote) {
+            content += ch;
+            if (escaped) {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if (ch === '\\') {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if (ch === quote) {
+                quote = null;
+            }
+            index += 1;
+            continue;
+        }
+
+        if (ch === '\'' || ch === '"' || ch === '`') {
+            quote = ch;
+            content += ch;
+            index += 1;
+            continue;
+        }
+        if (ch === '{') {
+            depth += 1;
+            content += ch;
+            index += 1;
+            continue;
+        }
+        if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return {
+                    content,
+                    end: index + 1
+                };
+            }
+            content += ch;
+            index += 1;
+            continue;
+        }
+        content += ch;
+        index += 1;
+    }
+
+    return null;
+}
+
+function _applyMarkerValue(nodes, marker, value) {
+    const markerPath = `marker[${marker.index}]`;
+    for (let i = 0; i < nodes.length; i++) {
+        try {
+            const node = nodes[i];
+            if (marker.kind === 'text') {
+                if (_isStructuralFragment(value)) {
+                    _mountStructuralFragment(node, value, `${markerPath}.text`);
+                    continue;
+                }
+
+                const html = _renderFragmentValue(value, `${markerPath}.text`);
+                if (html !== null) {
+                    node.innerHTML = html;
+                } else {
+                    node.textContent = _coerceText(value, `${markerPath}.text`);
+                }
+                continue;
+            }
+
+            if (marker.kind === 'attr') {
+                _applyAttribute(node, marker.attr, value);
+            }
+        } catch (error) {
+            rethrowZenithRuntimeError(error, {
+                phase: 'bind',
+                code: 'BINDING_APPLY_FAILED',
+                message: `Failed to apply ${marker.kind} binding at marker ${marker.index}`,
+                marker: {
+                    type: marker.kind === 'attr' ? `attr:${marker.attr}` : marker.kind,
+                    id: marker.index
+                },
+                path: marker.kind === 'attr'
+                    ? `${markerPath}.attr.${marker.attr}`
+                    : `${markerPath}.${marker.kind}`,
+                hint: 'Check the binding value type and marker mapping.'
+            });
         }
     }
 }
 
-function _coerceText(value) {
-    if (value === null || value === undefined || value === false) return '';
+function _isStructuralFragment(value) {
+    if (Array.isArray(value)) {
+        for (let i = 0; i < value.length; i++) {
+            if (_isStructuralFragment(value[i])) return true;
+        }
+        return false;
+    }
+    return value && typeof value === 'object' && value.__zenith_fragment === true && typeof value.mount === 'function';
+}
+
+function _mountStructuralFragment(container, value, rootPath = 'renderable') {
+    if (container.__z_unmounts) {
+        for (let i = 0; i < container.__z_unmounts.length; i++) {
+            try { container.__z_unmounts[i](); } catch (e) { }
+        }
+    }
+
+    container.innerHTML = '';
+    const newUnmounts = [];
+
+    function mountItem(item, path) {
+        if (Array.isArray(item)) {
+            for (let i = 0; i < item.length; i++) mountItem(item[i], `${path}[${i}]`);
+            return;
+        }
+        if (item && item.__zenith_fragment === true && typeof item.mount === 'function') {
+            item.mount(container);
+            if (typeof item.unmount === 'function') {
+                newUnmounts.push(item.unmount.bind(item));
+            }
+        } else {
+            const text = _coerceText(item, path);
+            if (text || text === '') {
+                const textNode = document.createTextNode(text);
+                container.appendChild(textNode);
+                newUnmounts.push(() => {
+                    if (textNode.parentNode) textNode.parentNode.removeChild(textNode);
+                });
+            }
+        }
+    }
+
+    try {
+        mountItem(value, rootPath);
+    } catch (error) {
+        rethrowZenithRuntimeError(error, {
+            phase: 'render',
+            code: 'FRAGMENT_MOUNT_FAILED',
+            message: 'Fragment mount failed',
+            path: rootPath,
+            hint: 'Verify fragment values and nested renderable arrays.'
+        });
+    }
+    container.__z_unmounts = newUnmounts;
+}
+
+function _coerceText(value, path = 'renderable') {
+    if (value === null || value === undefined || value === false || value === true) return '';
+    if (typeof value === 'function') {
+        throwZenithRuntimeError({
+            phase: 'render',
+            code: 'NON_RENDERABLE_VALUE',
+            message: `Zenith Render Error: non-renderable function at ${path}. Use map() to render fields.`,
+            path,
+            hint: 'Convert functions into explicit event handlers or renderable text.'
+        });
+    }
+    if (value && typeof value === 'object') {
+        throwZenithRuntimeError({
+            phase: 'render',
+            code: 'NON_RENDERABLE_VALUE',
+            message: `Zenith Render Error: non-renderable object at ${path}. Use map() to render fields.`,
+            path,
+            hint: 'Use map() to render object fields into nodes.'
+        });
+    }
     return String(value);
 }
 
+function _renderFragmentValue(value, path = 'renderable') {
+    if (value === null || value === undefined || value === false || value === true) {
+        return '';
+    }
+    if (Array.isArray(value)) {
+        let out = '';
+        for (let i = 0; i < value.length; i++) {
+            const itemPath = `${path}[${i}]`;
+            const piece = _renderFragmentValue(value[i], itemPath);
+            if (piece !== null) {
+                out += piece;
+                continue;
+            }
+            out += _escapeHtml(_coerceText(value[i], itemPath));
+        }
+        return out;
+    }
+    if (
+        value &&
+        typeof value === 'object' &&
+        value.__zenith_fragment === true &&
+        typeof value.html === 'string'
+    ) {
+        return value.html;
+    }
+    return null;
+}
+
+function _escapeHtml(input) {
+    return String(input)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function _renderLegacyMarkupInterpolation(value) {
+    if (value === null || value === undefined || value === false || value === true) {
+        return '';
+    }
+    if (Array.isArray(value)) {
+        let out = '';
+        for (let i = 0; i < value.length; i++) {
+            out += _renderLegacyMarkupInterpolation(value[i]);
+        }
+        return out;
+    }
+    if (
+        value &&
+        typeof value === 'object' &&
+        value.__zenith_fragment === true &&
+        typeof value.html === 'string'
+    ) {
+        return value.html;
+    }
+    return _escapeHtml(_coerceText(value, 'legacy markup interpolation'));
+}
+
 function _applyAttribute(node, attrName, value) {
+    if (typeof attrName === 'string' && attrName.toLowerCase() === 'innerhtml') {
+        node.innerHTML = value === null || value === undefined || value === false
+            ? ''
+            : String(value);
+        return;
+    }
+
     if (attrName === 'class' || attrName === 'className') {
         node.className = value === null || value === undefined || value === false ? '' : String(value);
         return;
@@ -446,4 +1577,20 @@ function _applyAttribute(node, attrName, value) {
     }
 
     node.setAttribute(attrName, String(value));
+}
+
+function _deepFreezePayload(obj) {
+    if (!obj || typeof obj !== 'object' || Object.isFrozen(obj)) return;
+    // Skip DOM nodes, signals (objects with get/subscribe), and functions
+    if (typeof obj.nodeType === 'number') return;
+    if (typeof obj.get === 'function' && typeof obj.subscribe === 'function') return;
+
+    Object.freeze(obj);
+    const keys = Object.keys(obj);
+    for (let i = 0; i < keys.length; i++) {
+        const val = obj[keys[i]];
+        if (val && typeof val === 'object' && typeof val !== 'function') {
+            _deepFreezePayload(val);
+        }
+    }
 }

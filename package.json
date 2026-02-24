@@ -1,8 +1,8 @@
 {
   "name": "@zenithbuild/runtime",
-  "version": "1.0.0",
+  "version": "0.5.0-beta.2",
   "type": "module",
-  "main": "./src/index.js",
+  "main": "./dist/index.js",
   "exports": {
     ".": "./src/index.js"
   },
@@ -10,12 +10,14 @@
     "access": "public"
   },
   "files": [
-    "src",
+    "dist",
     "RUNTIME_CONTRACT.md",
-    "HYDRATION_CONTRACT.md"
+    "HYDRATION_CONTRACT.md",
+    "README.md"
   ],
   "scripts": {
-    "test": "NODE_OPTIONS=--experimental-vm-modules jest --config jest.config.js"
+    "build": "mkdir -p dist && cp -a src/* dist/",
+    "test": "npm run build && NODE_OPTIONS=--experimental-vm-modules jest --config jest.config.js"
   },
   "devDependencies": {
     "@jest/globals": "^30.2.0",

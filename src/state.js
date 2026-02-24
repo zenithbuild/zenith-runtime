@@ -9,6 +9,24 @@
 //   store.set({ count: 1 });
 //   store.set((prev) => ({ ...prev, count: prev.count + 1 }));
 // ---------------------------------------------------------------------------
+import { _nextReactiveId, _trackDependency } from './zeneffect.js';
+
+function isPlainObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return false;
+    }
+    return Object.prototype.toString.call(value) === '[object Object]';
+}
+
+function cloneSnapshot(value) {
+    if (Array.isArray(value)) {
+        return [...value];
+    }
+    if (isPlainObject(value)) {
+        return { ...value };
+    }
+    return value;
+}
 
 /**
  * Create a proxy-free immutable state container.
@@ -17,11 +35,7 @@
  * @returns {{ get: () => object, set: (patch: object | ((prev: object) => object)) => object, subscribe: (fn: (next: object) => void) => () => void }}
  */
 export function state(initialValue) {
-    if (!initialValue || typeof initialValue !== 'object' || Array.isArray(initialValue)) {
-        throw new Error('[Zenith Runtime] state(initial) requires a plain object');
-    }
-
-    let current = Object.freeze({ ...initialValue });
+    let current = Object.freeze(cloneSnapshot(initialValue));
     const subscribers = new Set();
 
     return {
@@ -37,12 +51,12 @@ export function state(initialValue) {
                 throw new Error('[Zenith Runtime] state.set(next) must resolve to a plain object');
             }
 
-            const frozenNext = Object.freeze({ ...nextValue });
-            if (Object.is(current, frozenNext)) {
+            const nextSnapshot = Object.freeze(cloneSnapshot(nextValue));
+            if (Object.is(current, nextSnapshot)) {
                 return current;
             }
 
-            current = frozenNext;
+            current = nextSnapshot;
 
             const snapshot = [...subscribers];
             for (let i = 0; i < snapshot.length; i++) {

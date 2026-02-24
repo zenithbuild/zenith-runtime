@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import { _registerListener } from './cleanup.js';
+import { rethrowZenithRuntimeError, throwZenithRuntimeError } from './diagnostics.js';
 
 /**
  * Bind an event listener to a DOM element.
@@ -27,8 +28,32 @@ import { _registerListener } from './cleanup.js';
 export function bindEvent(element, eventName, exprFn) {
     const resolved = exprFn();
 
-    if (typeof resolved !== 'function') return;
+    if (typeof resolved !== 'function') {
+        throwZenithRuntimeError({
+            phase: 'bind',
+            code: 'BINDING_APPLY_FAILED',
+            message: `Event binding did not resolve to a function for "${eventName}"`,
+            marker: { type: `data-zx-on-${eventName}`, id: '<unknown>' },
+            path: `event:${eventName}`,
+            hint: 'Bind events to function references.'
+        });
+    }
 
-    element.addEventListener(eventName, resolved);
-    _registerListener(element, eventName, resolved);
+    const wrapped = function zenithBoundEvent(event) {
+        try {
+            return resolved.call(this, event);
+        } catch (error) {
+            rethrowZenithRuntimeError(error, {
+                phase: 'event',
+                code: 'EVENT_HANDLER_FAILED',
+                message: `Event handler failed for "${eventName}"`,
+                marker: { type: `data-zx-on-${eventName}`, id: '<unknown>' },
+                path: `event:${eventName}:${resolved.name || '<anonymous>'}`,
+                hint: 'Inspect handler logic and referenced state.'
+            });
+        }
+    };
+
+    element.addEventListener(eventName, wrapped);
+    _registerListener(element, eventName, wrapped);
 }

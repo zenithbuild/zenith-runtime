@@ -11,6 +11,8 @@
 // Calling cleanup() twice is a no-op.
 // ---------------------------------------------------------------------------
 
+import { resetGlobalSideEffects } from './zeneffect.js';
+
 /** @type {function[]} */
 const _disposers = [];
 
@@ -50,7 +52,13 @@ export function _registerListener(element, event, handler) {
  * - Idempotent: calling twice is a no-op
  */
 export function cleanup() {
-    if (_cleaned) return;
+    // Global zenMount/zenEffect registrations can be created outside hydrate's
+    // disposer table (e.g. page-level component bootstraps). Even when cleanup
+    // has already run once, we still need to reset that scope deterministically.
+    if (_cleaned) {
+        resetGlobalSideEffects();
+        return;
+    }
 
     // 1. Dispose all effects
     for (let i = 0; i < _disposers.length; i++) {

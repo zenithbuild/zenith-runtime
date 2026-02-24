@@ -2,6 +2,7 @@ import { hydrate } from '../src/hydrate.js';
 import { cleanup, _getCounts } from '../src/cleanup.js';
 
 describe('hydrate() event contract', () => {
+    const OVERLAY_ID = '__zenith_runtime_error_overlay';
     let container;
 
     beforeEach(() => {
@@ -11,6 +12,10 @@ describe('hydrate() event contract', () => {
 
     afterEach(() => {
         cleanup();
+        const overlay = document.getElementById(OVERLAY_ID);
+        if (overlay && overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
+        }
         document.body.removeChild(container);
     });
 
@@ -46,5 +51,40 @@ describe('hydrate() event contract', () => {
             state_values: [42],
             signals: []
         })).toThrow('did not resolve to a function');
+    });
+
+    test('surfaces structured EVENT_HANDLER_FAILED when handler throws', () => {
+        container.innerHTML = '<button data-zx-on-click="0">+</button>';
+
+        hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [{ marker_index: 0, state_index: 0 }],
+            markers: [{ index: 0, kind: 'event', selector: '[data-zx-on-click="0"]' }],
+            events: [{ index: 0, event: 'click', selector: '[data-zx-on-click="0"]' }],
+            state_values: [() => {
+                throw new Error('/Users/judahsullivan/private/boom');
+            }],
+            signals: []
+        });
+
+        let thrown = null;
+        const onWindowError = (event) => {
+            thrown = event.error;
+            if (typeof event.preventDefault === 'function') {
+                event.preventDefault();
+            }
+        };
+        window.addEventListener('error', onWindowError);
+        container.querySelector('button').click();
+        window.removeEventListener('error', onWindowError);
+
+        expect(thrown).toBeTruthy();
+        expect(thrown.zenithRuntimeError).toBeTruthy();
+        expect(thrown.zenithRuntimeError.kind).toBe('ZENITH_RUNTIME_ERROR');
+        expect(thrown.zenithRuntimeError.phase).toBe('event');
+        expect(thrown.zenithRuntimeError.code).toBe('EVENT_HANDLER_FAILED');
+        expect(thrown.zenithRuntimeError.marker).toEqual({ type: 'data-zx-on-click', id: 0 });
+        expect(thrown.zenithRuntimeError.message.includes('/Users/')).toBe(false);
     });
 });
