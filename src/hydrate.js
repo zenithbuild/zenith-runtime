@@ -484,7 +484,11 @@ function _validatePayload(payload) {
         if (Array.isArray(c.props)) {
             for (let j = 0; j < c.props.length; j++) {
                 const propDesc = c.props[j];
-                if (propDesc && typeof propDesc === 'object' && propDesc.value && typeof propDesc.value === 'object') {
+                if (
+                    propDesc &&
+                    typeof propDesc === 'object' &&
+                    _isHydrationFreezableContainer(propDesc.value)
+                ) {
                     Object.freeze(propDesc.value);
                 }
                 Object.freeze(propDesc);
@@ -1580,10 +1584,7 @@ function _applyAttribute(node, attrName, value) {
 }
 
 function _deepFreezePayload(obj) {
-    if (!obj || typeof obj !== 'object' || Object.isFrozen(obj)) return;
-    // Skip DOM nodes, signals (objects with get/subscribe), and functions
-    if (typeof obj.nodeType === 'number') return;
-    if (typeof obj.get === 'function' && typeof obj.subscribe === 'function') return;
+    if (!_isHydrationFreezableContainer(obj) || Object.isFrozen(obj)) return;
 
     Object.freeze(obj);
     const keys = Object.keys(obj);
@@ -1593,4 +1594,48 @@ function _deepFreezePayload(obj) {
             _deepFreezePayload(val);
         }
     }
+}
+
+function _isHydrationRefObject(obj) {
+    if (!obj || typeof obj !== 'object') {
+        return false;
+    }
+    if (obj.__zenith_ref === true) {
+        return true;
+    }
+    if (!Object.prototype.hasOwnProperty.call(obj, 'current')) {
+        return false;
+    }
+    if (typeof obj.get === 'function' && typeof obj.subscribe === 'function') {
+        return false;
+    }
+    const keys = Object.keys(obj);
+    if (keys.length === 1 && keys[0] === 'current') {
+        return true;
+    }
+    if (keys.length === 2 && keys.includes('current') && keys.includes('__zenith_ref')) {
+        return true;
+    }
+    return false;
+}
+
+function _isPlainObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return false;
+    }
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+}
+
+function _isHydrationFreezableContainer(value) {
+    if (Array.isArray(value)) return true;
+    if (!_isPlainObject(value)) return false;
+
+    if (_isHydrationRefObject(value)) {
+        return false;
+    }
+    if (typeof value.get === 'function' && typeof value.subscribe === 'function') {
+        return false;
+    }
+    return true;
 }

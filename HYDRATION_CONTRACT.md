@@ -96,3 +96,17 @@ Forbidden in runtime/bundler output:
 - `process.env`
 
 Compile-time guarantees override runtime flexibility.
+
+## 8. Freeze Boundary Contract
+
+Runtime payload freezing is allowed only for deterministic internal tables and
+plain JSON-like containers controlled by runtime (`Object` / `Array`).
+
+Runtime MUST NOT freeze:
+- `ref()` objects (objects with writable `.current`)
+- function values (handlers/callbacks)
+- host/platform objects (`Node`, `EventTarget`, `URL`, `Request`, `Response`, etc.)
+
+Rationale:
+- hydration and `zenMount` must be able to assign `ref.current` without throwing
+- host objects preserve platform mutability semantics
