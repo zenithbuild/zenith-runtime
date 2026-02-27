@@ -43,6 +43,7 @@ const COMPILED_LITERAL_CACHE = new Map();
  *   expressions: Array<{ marker_index: number, signal_index?: number|null, state_index?: number|null, component_instance?: string|null, component_binding?: string|null, literal?: string|null }>,
  *   markers: Array<{ index: number, kind: 'text' | 'attr' | 'event', selector: string, attr?: string }>,
  *   events: Array<{ index: number, event: string, selector: string }>,
+ *   refs?: Array<{ index: number, state_index: number, selector: string }>,
  *   state_values: Array<*>,
  *   state_keys?: Array<string>,
  *   signals: Array<{ id: number, kind: 'signal', state_index: number }>,
@@ -55,7 +56,21 @@ export function hydrate(payload) {
     try {
         const normalized = _validatePayload(payload);
         _deepFreezePayload(payload);
-        const { root, expressions, markers, events, stateValues, stateKeys, signals, components, route, params, ssrData, props } = normalized;
+        const {
+            root,
+            expressions,
+            markers,
+            events,
+            refs,
+            stateValues,
+            stateKeys,
+            signals,
+            components,
+            route,
+            params,
+            ssrData,
+            props
+        } = normalized;
 
         const componentBindings = Object.create(null);
 
@@ -70,6 +85,23 @@ export function hydrate(payload) {
                 throw new Error(`[Zenith Runtime] signal id ${signalDescriptor.id} must expose get() and subscribe()`);
             }
             signalMap.set(i, candidate);
+        }
+
+        const hydratedRefs = [];
+        for (let i = 0; i < refs.length; i++) {
+            const refBinding = refs[i];
+            const targetRef = stateValues[refBinding.state_index];
+            const nodes = _resolveNodes(root, refBinding.selector, refBinding.index, 'ref');
+            targetRef.current = nodes[0] || null;
+            hydratedRefs.push(targetRef);
+        }
+
+        if (hydratedRefs.length > 0) {
+            _registerDisposer(() => {
+                for (let i = 0; i < hydratedRefs.length; i++) {
+                    hydratedRefs[i].current = null;
+                }
+            });
         }
 
         for (let i = 0; i < components.length; i++) {
@@ -246,6 +278,7 @@ export function hydrate(payload) {
         }
 
         const eventIndices = new Set();
+        const escDispatchEntries = [];
         for (let i = 0; i < events.length; i++) {
             const eventBinding = events[i];
             if (eventIndices.has(eventBinding.index)) {
@@ -291,8 +324,64 @@ export function hydrate(payload) {
                         });
                     }
                 };
+                if (eventBinding.event === 'esc') {
+                    escDispatchEntries.push({
+                        node,
+                        handler: wrappedHandler
+                    });
+                    continue;
+                }
                 node.addEventListener(eventBinding.event, wrappedHandler);
                 _registerListener(node, eventBinding.event, wrappedHandler);
+            }
+        }
+
+        if (escDispatchEntries.length > 0) {
+            const doc = root && root.ownerDocument ? root.ownerDocument : (typeof document !== 'undefined' ? document : null);
+            if (doc && typeof doc.addEventListener === 'function') {
+                const escDispatchListener = function zenithEscDispatch(event) {
+                    if (!event || event.key !== 'Escape') {
+                        return;
+                    }
+
+                    const activeElement = doc.activeElement || null;
+                    let targetEntry = null;
+
+                    if (activeElement && activeElement !== doc.body && activeElement !== doc.documentElement) {
+                        for (let i = escDispatchEntries.length - 1; i >= 0; i--) {
+                            const entry = escDispatchEntries[i];
+                            if (!entry || !entry.node) {
+                                continue;
+                            }
+                            if (!entry.node.isConnected) {
+                                continue;
+                            }
+                            if (typeof entry.node.contains === 'function' && entry.node.contains(activeElement)) {
+                                targetEntry = entry;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!targetEntry && (activeElement === null || activeElement === doc.body || activeElement === doc.documentElement)) {
+                        for (let i = escDispatchEntries.length - 1; i >= 0; i--) {
+                            const entry = escDispatchEntries[i];
+                            if (!entry || !entry.node || !entry.node.isConnected) {
+                                continue;
+                            }
+                            targetEntry = entry;
+                            break;
+                        }
+                    }
+
+                    if (!targetEntry) {
+                        return;
+                    }
+
+                    return targetEntry.handler.call(targetEntry.node, event);
+                };
+                doc.addEventListener('keydown', escDispatchListener);
+                _registerListener(doc, 'keydown', escDispatchListener);
             }
         }
 
@@ -335,6 +424,8 @@ function _validatePayload(payload) {
     if (!Array.isArray(events)) {
         throw new Error('[Zenith Runtime] hydrate(payload) requires events[]');
     }
+
+    const refs = Array.isArray(payload.refs) ? payload.refs : [];
 
     const stateValues = payload.state_values;
     if (!Array.isArray(stateValues)) {
@@ -425,6 +516,34 @@ function _validatePayload(payload) {
         }
     }
 
+    for (let i = 0; i < refs.length; i++) {
+        const refBinding = refs[i];
+        if (!refBinding || typeof refBinding !== 'object' || Array.isArray(refBinding)) {
+            throw new Error(`[Zenith Runtime] ref binding at position ${i} must be an object`);
+        }
+        if (!Number.isInteger(refBinding.index) || refBinding.index < 0) {
+            throw new Error(`[Zenith Runtime] ref binding at position ${i} requires non-negative index`);
+        }
+        if (
+            !Number.isInteger(refBinding.state_index) ||
+            refBinding.state_index < 0 ||
+            refBinding.state_index >= stateValues.length
+        ) {
+            throw new Error(
+                `[Zenith Runtime] ref binding at position ${i} has out-of-bounds state_index`
+            );
+        }
+        if (typeof refBinding.selector !== 'string' || refBinding.selector.length === 0) {
+            throw new Error(`[Zenith Runtime] ref binding at position ${i} requires selector`);
+        }
+        const candidate = stateValues[refBinding.state_index];
+        if (!candidate || typeof candidate !== 'object' || !Object.prototype.hasOwnProperty.call(candidate, 'current')) {
+            throw new Error(
+                `[Zenith Runtime] ref binding at position ${i} must resolve to a ref-like object`
+            );
+        }
+    }
+
     for (let i = 0; i < signals.length; i++) {
         const signalDescriptor = signals[i];
         if (!signalDescriptor || typeof signalDescriptor !== 'object' || Array.isArray(signalDescriptor)) {
@@ -478,6 +597,7 @@ function _validatePayload(payload) {
     for (let i = 0; i < expressions.length; i++) Object.freeze(expressions[i]);
     for (let i = 0; i < markers.length; i++) Object.freeze(markers[i]);
     for (let i = 0; i < events.length; i++) Object.freeze(events[i]);
+    for (let i = 0; i < refs.length; i++) Object.freeze(refs[i]);
     for (let i = 0; i < signals.length; i++) Object.freeze(signals[i]);
     for (let i = 0; i < components.length; i++) {
         const c = components[i];
@@ -501,6 +621,7 @@ function _validatePayload(payload) {
     Object.freeze(expressions);
     Object.freeze(markers);
     Object.freeze(events);
+    Object.freeze(refs);
     Object.freeze(signals);
     Object.freeze(components);
 
@@ -509,6 +630,7 @@ function _validatePayload(payload) {
         expressions,
         markers,
         events,
+        refs,
         stateValues,
         stateKeys,
         signals,
