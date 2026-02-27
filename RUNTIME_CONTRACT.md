@@ -1,5 +1,8 @@
 # RUNTIME_CONTRACT.md — Sealed Runtime Interface
 
+Canonical public docs: `../zenith-docs/documentation/contracts/runtime-contract.md`
+
+
 > **This document is a legal boundary.**
 > The runtime is a consumer of bundler output.
 > It does not reinterpret, normalize, or extend.

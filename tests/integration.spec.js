@@ -250,6 +250,27 @@ describe('hydrate integration contract', () => {
         expect(nodeRef.current).toBe(host);
     });
 
+    test('hydrates compiler ref bindings before mount effects and clears refs on cleanup', () => {
+        container.innerHTML = '<section data-zx-r="0"></section>';
+        const nodeRef = { current: null };
+
+        const unmount = hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [],
+            markers: [],
+            events: [],
+            refs: [{ index: 0, state_index: 0, selector: '[data-zx-r="0"]' }],
+            state_values: [nodeRef],
+            state_keys: ['nodeRef'],
+            signals: []
+        });
+
+        expect(nodeRef.current).toBe(container.querySelector('[data-zx-r="0"]'));
+        unmount();
+        expect(nodeRef.current).toBeNull();
+    });
+
     test('keeps nested ref-like component prop values writable for mount wiring', () => {
         container.innerHTML = '<Card data-zx-c="c0"></Card>';
         const hostRef = { current: null };

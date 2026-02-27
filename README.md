@@ -5,6 +5,12 @@
 
 The core runtime library for the Zenith framework.
 
+## Canonical Docs
+
+- Runtime contract: `../zenith-docs/documentation/contracts/runtime-contract.md`
+- Hydration contract: `../zenith-docs/documentation/contracts/hydration-contract.md`
+- Reactive binding model: `../zenith-docs/documentation/reference/reactive-binding-model.md`
+
 ## Overview
 This package provides the reactivity system, hydration logic, and Virtual DOM primitives used by Zenith applications. It is designed to be lightweight, fast, and tree-shakeable.
 
