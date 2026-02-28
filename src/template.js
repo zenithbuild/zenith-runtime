@@ -22,6 +22,8 @@ function buildRuntimeModuleSource() {
     const segments = [
         stripImports(readRuntimeSourceFile('zeneffect.js')),
         stripImports(readRuntimeSourceFile('ref.js')),
+        stripImports(readRuntimeSourceFile('env.js')),
+        stripImports(readRuntimeSourceFile('platform.js')),
         stripImports(readRuntimeSourceFile('signal.js')),
         stripImports(readRuntimeSourceFile('state.js')),
         stripImports(readRuntimeSourceFile('diagnostics.js')),

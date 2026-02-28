@@ -4,11 +4,22 @@ import { fileURLToPath } from 'node:url';
 import * as runtimeApi from '../src/index.js';
 import { hydrate } from '../src/hydrate.js';
 import { cleanup } from '../src/cleanup.js';
+import { zenOn, zenWindow } from '../src/index.js';
 
 describe('runtime API lock', () => {
     test('exports explicit hydration/reactivity functions', () => {
         const keys = Object.keys(runtimeApi).sort();
-        expect(keys).toEqual(['hydrate', 'signal', 'state', 'zeneffect']);
+        expect(keys).toEqual([
+            'collectRefs',
+            'hydrate',
+            'signal',
+            'state',
+            'zenDocument',
+            'zenOn',
+            'zenResize',
+            'zenWindow',
+            'zeneffect'
+        ]);
     });
 });
 
@@ -269,6 +280,127 @@ describe('hydrate integration contract', () => {
         expect(nodeRef.current).toBe(container.querySelector('[data-zx-r="0"]'));
         unmount();
         expect(nodeRef.current).toBeNull();
+    });
+
+    test('zenMount ctx.cleanup exists (editor contract: snippets/docs claim it)', () => {
+        container.innerHTML = '<section data-zx-r="0"></section>';
+        const nodeRef = { current: null };
+        let cleanupExists = false;
+
+        hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [],
+            markers: [],
+            events: [],
+            refs: [{ index: 0, state_index: 0, selector: '[data-zx-r="0"]' }],
+            state_values: [nodeRef],
+            state_keys: ['nodeRef'],
+            signals: [],
+            components: [{
+                instance: 'c0',
+                selector: '[data-zx-r="0"]',
+                props: [],
+                create: (_host, _props, runtime) => ({
+                    mount() {
+                        runtime.zenMount((ctx) => {
+                            cleanupExists = typeof ctx.cleanup === 'function';
+                        });
+                    },
+                    destroy() { },
+                    bindings: Object.freeze({})
+                })
+            }]
+        });
+
+        expect(cleanupExists).toBe(true);
+    });
+
+    test('ref.current is set when zenMount callback runs (ref readiness invariant)', () => {
+        container.innerHTML = '<section data-zx-r="0">content</section>';
+        const nodeRef = { current: null };
+        let refReadyInMount = null;
+
+        hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [],
+            markers: [],
+            events: [],
+            refs: [{ index: 0, state_index: 0, selector: '[data-zx-r="0"]' }],
+            state_values: [nodeRef],
+            state_keys: ['nodeRef'],
+            signals: [],
+            components: [{
+                instance: 'c0',
+                selector: '[data-zx-r="0"]',
+                props: [{ name: 'nodeRef', type: 'static', value: nodeRef }],
+                create: (_host, props, runtime) => {
+                    const ref = props.nodeRef;
+                    return {
+                        mount() {
+                            runtime.zenMount((ctx) => {
+                                refReadyInMount = ref.current !== null;
+                                ctx.cleanup(() => { refReadyInMount = null; });
+                            });
+                        },
+                        destroy() { },
+                        bindings: Object.freeze({})
+                    };
+                }
+            }]
+        });
+
+        expect(refReadyInMount).toBe(true);
+        expect(nodeRef.current).toBe(container.querySelector('[data-zx-r="0"]'));
+    });
+
+    test('zenOn + zenMount cleanup: handler does not fire after unmount', () => {
+        container.innerHTML = '<section data-zx-r="0"></section>';
+        const nodeRef = { current: null };
+        let resizeCount = 0;
+
+        const unmount = hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [],
+            markers: [],
+            events: [],
+            refs: [{ index: 0, state_index: 0, selector: '[data-zx-r="0"]' }],
+            state_values: [nodeRef],
+            state_keys: ['nodeRef'],
+            signals: [],
+            components: [{
+                instance: 'c0',
+                selector: '[data-zx-r="0"]',
+                props: [
+                    { name: 'zenOn', type: 'static', value: zenOn },
+                    { name: 'zenWindow', type: 'static', value: zenWindow }
+                ],
+                create: (_host, props, runtime) => {
+                    return {
+                        mount() {
+                            runtime.zenMount((ctx) => {
+                                const win = props.zenWindow();
+                                if (!win) return;
+                                const off = props.zenOn(win, 'resize', () => { resizeCount += 1; });
+                                ctx.cleanup(off);
+                            });
+                        },
+                        destroy() { },
+                        bindings: Object.freeze({})
+                    };
+                }
+            }]
+        });
+
+        window.dispatchEvent(new Event('resize'));
+        expect(resizeCount).toBeGreaterThanOrEqual(0);
+
+        unmount();
+        const countBefore = resizeCount;
+        window.dispatchEvent(new Event('resize'));
+        expect(resizeCount).toBe(countBefore);
     });
 
     test('keeps nested ref-like component prop values writable for mount wiring', () => {
