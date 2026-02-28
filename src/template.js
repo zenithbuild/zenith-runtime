@@ -119,18 +119,101 @@ const RUNTIME_DEV_CLIENT_SOURCE = `(() => {
       });
   }
 
-  function swapStylesheet(nextHref) {
+  let cssSwapEpoch = 0;
+
+  function withCacheBuster(nextHref) {
+    const separator = nextHref.includes('?') ? '&' : '?';
+    return nextHref + separator + '__zenith_dev=' + Date.now();
+  }
+
+  function isSameOriginStylesheet(href) {
+    if (typeof href !== 'string' || href.length === 0) {
+      return false;
+    }
+    if (href.startsWith('http://') || href.startsWith('https://')) {
+      try {
+        return new URL(href, window.location.href).origin === window.location.origin;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function findPrimaryStylesheet() {
+    const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+      .filter(function (link) {
+        return isSameOriginStylesheet(link.getAttribute('href') || '');
+      });
+    if (links.length === 0) {
+      return null;
+    }
+    const marked = links.find(function (link) {
+      return link.getAttribute('data-zenith-dev-primary') === 'true';
+    });
+    if (marked) {
+      return marked;
+    }
+    links[0].setAttribute('data-zenith-dev-primary', 'true');
+    return links[0];
+  }
+
+  function scheduleCssRetry(previousHref, attempt) {
+    if (attempt >= 3) {
+      window.location.reload();
+      return;
+    }
+    const delayMs = (attempt + 1) * 100;
+    setTimeout(function () {
+      fetchDevState().then(function (statePayload) {
+        const href = statePayload && typeof statePayload.cssHref === 'string' && statePayload.cssHref.length > 0
+          ? statePayload.cssHref
+          : previousHref;
+        swapStylesheet(href, attempt + 1);
+      });
+    }, delayMs);
+  }
+
+  function swapStylesheet(nextHref, attempt) {
+    const tries = Number.isInteger(attempt) ? attempt : 0;
     if (typeof nextHref !== 'string' || nextHref.length === 0) {
       window.location.reload();
       return;
     }
-    const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
-    if (links.length === 0) {
+    const activeLink = findPrimaryStylesheet();
+    if (!activeLink) {
       window.location.reload();
       return;
     }
-    const separator = nextHref.includes('?') ? '&' : '?';
-    links[0].setAttribute('href', nextHref + separator + '__zenith_dev=' + Date.now());
+
+    const swapId = ++cssSwapEpoch;
+    const nextLink = activeLink.cloneNode(true);
+    nextLink.setAttribute('href', withCacheBuster(nextHref));
+    nextLink.removeAttribute('data-zenith-dev-primary');
+    nextLink.setAttribute('data-zenith-dev-pending', 'true');
+    activeLink.removeAttribute('data-zenith-dev-primary');
+
+    nextLink.addEventListener('load', function () {
+      if (swapId !== cssSwapEpoch) {
+        try { nextLink.remove(); } catch { }
+        return;
+      }
+      nextLink.removeAttribute('data-zenith-dev-pending');
+      nextLink.setAttribute('data-zenith-dev-primary', 'true');
+      try { activeLink.remove(); } catch { }
+    }, { once: true });
+
+    nextLink.addEventListener('error', function () {
+      if (swapId !== cssSwapEpoch) {
+        try { nextLink.remove(); } catch { }
+        return;
+      }
+      try { nextLink.remove(); } catch { }
+      activeLink.setAttribute('data-zenith-dev-primary', 'true');
+      scheduleCssRetry(nextHref, tries);
+    }, { once: true });
+
+    activeLink.insertAdjacentElement('afterend', nextLink);
   }
 
   const state = ensureDevState();
@@ -341,8 +424,10 @@ const RUNTIME_DEV_CLIENT_SOURCE = `(() => {
     appendLog('[css_update] ' + (payload.href || ''));
     emitDebug('css_update', payload);
     fetchDevState().then(function (statePayload) {
-      if (statePayload && typeof statePayload.cssHref === 'string' && statePayload.cssHref.length > 0) {
+      if (statePayload) {
         updateInfo({ ...payload, ...statePayload });
+      }
+      if (statePayload && typeof statePayload.cssHref === 'string' && statePayload.cssHref.length > 0) {
         swapStylesheet(statePayload.cssHref);
         return;
       }
