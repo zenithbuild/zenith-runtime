@@ -162,20 +162,26 @@ describe('hydrate() marker contract', () => {
 
     test('renders ternary zenhtml fragments', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const flag = true;
 
         hydrate({
             ir_version: 1,
             root: container,
             expressions: [
-                { marker_index: 0, literal: 'flag ? __ZENITH_INTERNAL_ZENHTML`<h1>A</h1>` : __ZENITH_INTERNAL_ZENHTML`<h1>B</h1>`' }
+                { marker_index: 0, fn_index: 0 }
             ],
             markers: [
                 { index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }
             ],
             events: [],
-            state_values: [true],
-            state_keys: ['flag'],
-            signals: []
+            state_values: [],
+            state_keys: [],
+            signals: [],
+            expr_fns: [
+                () => (flag
+                    ? { __zenith_fragment: true, html: '<h1>A</h1>' }
+                    : { __zenith_fragment: true, html: '<h1>B</h1>' })
+            ]
         });
 
         expect(container.querySelector('section').innerHTML).toBe('<h1>A</h1>');
@@ -188,7 +194,7 @@ describe('hydrate() marker contract', () => {
             ir_version: 1,
             root: container,
             expressions: [
-                { marker_index: 0, literal: 'data.items.map((x) => __ZENITH_INTERNAL_ZENHTML`<li>${x.name}</li>`)' }
+                { marker_index: 0, fn_index: 0 }
             ],
             markers: [
                 { index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }
@@ -196,6 +202,12 @@ describe('hydrate() marker contract', () => {
             events: [],
             state_values: [],
             signals: [],
+            expr_fns: [
+                ({ ssrData }) => ssrData.items.map((item) => ({
+                    __zenith_fragment: true,
+                    html: `<li>${item.name}</li>`
+                }))
+            ],
             ssr_data: {
                 items: [{ name: 'One' }, { name: 'Two' }]
             }
@@ -206,6 +218,8 @@ describe('hydrate() marker contract', () => {
 
     test('renders mapped zenhtml fragments from rewritten component bindings', () => {
         container.innerHTML = '<ul data-zx-e="0"></ul>';
+        const contributors = [{ tier: 'xl' }, { tier: 'sm' }];
+        const tierClass = (tier) => `tier:${tier}`;
 
         hydrate({
             ir_version: 1,
@@ -213,18 +227,17 @@ describe('hydrate() marker contract', () => {
             expressions: [
                 {
                     marker_index: 0,
-                    literal:
-                        '__component_contributors.map((c) => __ZENITH_INTERNAL_ZENHTML`<li>${__component_tierClass(c.tier)}</li>`)'
+                    fn_index: 0
                 }
             ],
             markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
             events: [],
-            state_values: [
-                [{ tier: 'xl' }, { tier: 'sm' }],
-                (tier) => `tier:${tier}`
-            ],
-            state_keys: ['__component_contributors', '__component_tierClass'],
-            signals: []
+            state_values: [],
+            state_keys: [],
+            signals: [],
+            expr_fns: [
+                ({ zenhtml }) => contributors.map((c) => zenhtml`<li>${tierClass(c.tier)}</li>`)
+            ]
         });
 
         expect(container.querySelector('ul').innerHTML).toBe('<li>tier:xl</li><li>tier:sm</li>');
@@ -232,6 +245,9 @@ describe('hydrate() marker contract', () => {
 
     test('keeps attribute expression values quoted in mapped zenhtml fragments', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const items = [{ tier: 'xl', x: '50%', y: '25%' }];
+        const tierClass = (tier) => `tier-${tier}`;
+        const nodeStyle = (item) => `left:${item.x};top:${item.y};`;
 
         hydrate({
             ir_version: 1,
@@ -239,19 +255,20 @@ describe('hydrate() marker contract', () => {
             expressions: [
                 {
                     marker_index: 0,
-                    literal:
-                        '__component_items.map((c) => __ZENITH_INTERNAL_ZENHTML`<div class="node ${__component_tierClass(c.tier)}" style="${__component_nodeStyle(c)}"></div>`)'
+                    fn_index: 0
                 }
             ],
             markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
             events: [],
-            state_values: [
-                [{ tier: 'xl', x: '50%', y: '25%' }],
-                (tier) => `tier-${tier}`,
-                (item) => `left:${item.x};top:${item.y};`
-            ],
-            state_keys: ['__component_items', '__component_tierClass', '__component_nodeStyle'],
-            signals: []
+            state_values: [],
+            state_keys: [],
+            signals: [],
+            expr_fns: [
+                ({ zenhtml }) => items.map(
+                    (item) =>
+                        zenhtml`<div class="node ${tierClass(item.tier)}" style="${nodeStyle(item)}"></div>`
+                )
+            ]
         });
 
         expect(container.querySelector('section').innerHTML).toBe(
@@ -261,6 +278,9 @@ describe('hydrate() marker contract', () => {
 
     test('renders complex mapped zenhtml fragments used by about contributors section', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const contributors = [{ id: 1, tier: 'xl', x: '50%', y: '25%' }];
+        const tierClass = (tier) => `tier-${tier}`;
+        const nodeStyle = (item) => `left:${item.x};top:${item.y};`;
 
         hydrate({
             ir_version: 1,
@@ -268,27 +288,31 @@ describe('hydrate() marker contract', () => {
             expressions: [
                 {
                     marker_index: 0,
-                    literal:
-                        '__component_contributors.map((c) => __ZENITH_INTERNAL_ZENHTML`<div data-constellation-node class="constellation-node ${__component_tierClass(c.tier)}" style="${__component_nodeStyle(c)}"><div class="absolute inset-0 bg-current opacity-20 hover:opacity-40 transition-opacity"></div></div>`)'
+                    fn_index: 0
                 }
             ],
             markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
             events: [],
-            state_values: [
-                [{ id: 1, tier: 'xl', x: '50%', y: '25%' }],
-                (tier) => `tier-${tier}`,
-                (item) => `left:${item.x};top:${item.y};`
+            state_values: [],
+            signals: [],
+            expr_fns: [
+                () => contributors.map((item) => ({
+                    __zenith_fragment: true,
+                    html:
+                        `<div data-constellation-node class="constellation-node ${tierClass(item.tier)}" style="${nodeStyle(item)}"><div class="absolute inset-0 bg-current opacity-20 hover:opacity-40 transition-opacity"></div></div>`
+                }))
             ],
-            state_keys: ['__component_contributors', '__component_tierClass', '__component_nodeStyle'],
-            signals: []
+            state_keys: []
         });
 
         expect(container.querySelectorAll('[data-constellation-node]').length).toBe(1);
         expect(container.querySelector('section').innerHTML.includes('class="constellation-node tier-xl"')).toBe(true);
     });
 
-    test('resolves mangled component state aliases for mapped fragments (no raw expression leak)', () => {
+    test('renders mapped fragments through compiled expression functions (no raw expression leak)', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const contributors = [{ tier: 'xl' }];
+        const makeTierFragment = (tier) => ({ __zenith_fragment: true, html: `<div class="tier-${tier}"></div>` });
 
         hydrate({
             ir_version: 1,
@@ -296,20 +320,17 @@ describe('hydrate() marker contract', () => {
             expressions: [
                 {
                     marker_index: 0,
-                    literal: 'contributors.map((c) => (__z_frag_1(c.tier)))'
+                    fn_index: 0
                 }
             ],
             markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
             events: [],
-            state_values: [
-                (tier) => ({ __zenith_fragment: true, html: `<div class="tier-${tier}"></div>` }),
-                [{ tier: 'xl' }]
+            state_values: [],
+            state_keys: [],
+            signals: [],
+            expr_fns: [
+                () => contributors.map((item) => makeTierFragment(item.tier))
             ],
-            state_keys: [
-                '__z_frag_1',
-                '___Users_judahsullivan_Personal_zenith_zenith_site_v0_src_components_sections_AboutContributorsSection_zen_script0_abcd1234_contributors'
-            ],
-            signals: []
         });
 
         const section = container.querySelector('section');
@@ -320,48 +341,50 @@ describe('hydrate() marker contract', () => {
 
     test('mounts mapped structural fragments without object coercion', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const items = ['alpha', 'beta'];
+        const makeFragment = (label) => ({
+            __zenith_fragment: true,
+            mount(anchor) {
+                const parent = anchor && anchor.nodeType === 1
+                    ? anchor
+                    : (anchor && anchor.parentNode ? anchor.parentNode : null);
+                if (!parent) {
+                    return;
+                }
+                const el = document.createElement('span');
+                el.setAttribute('data-frag-item', 'true');
+                el.textContent = String(label);
+                if (anchor && anchor.nodeType !== 1 && anchor.parentNode === parent) {
+                    parent.insertBefore(el, anchor);
+                } else {
+                    parent.appendChild(el);
+                }
+                this.nodes = [el];
+            },
+            unmount() {
+                if (this.nodes) {
+                    for (let i = 0; i < this.nodes.length; i++) {
+                        const node = this.nodes[i];
+                        if (node && node.parentNode) {
+                            node.parentNode.removeChild(node);
+                        }
+                    }
+                }
+            }
+        });
 
         hydrate({
             ir_version: 1,
             root: container,
-            expressions: [{ marker_index: 0, literal: 'items.map((item) => makeFragment(item))' }],
+            expressions: [{ marker_index: 0, fn_index: 0 }],
             markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
             events: [],
-            state_values: [
-                ['alpha', 'beta'],
-                (label) => ({
-                    __zenith_fragment: true,
-                    mount(anchor) {
-                        const parent = anchor && anchor.nodeType === 1
-                            ? anchor
-                            : (anchor && anchor.parentNode ? anchor.parentNode : null);
-                        if (!parent) {
-                            return;
-                        }
-                        const el = document.createElement('span');
-                        el.setAttribute('data-frag-item', 'true');
-                        el.textContent = String(label);
-                        if (anchor && anchor.nodeType !== 1 && anchor.parentNode === parent) {
-                            parent.insertBefore(el, anchor);
-                        } else {
-                            parent.appendChild(el);
-                        }
-                        this.nodes = [el];
-                    },
-                    unmount() {
-                        if (this.nodes) {
-                            for (let i = 0; i < this.nodes.length; i++) {
-                                const node = this.nodes[i];
-                                if (node && node.parentNode) {
-                                    node.parentNode.removeChild(node);
-                                }
-                            }
-                        }
-                    }
-                })
+            state_values: [],
+            state_keys: [],
+            signals: [],
+            expr_fns: [
+                () => items.map((item) => makeFragment(item))
             ],
-            state_keys: ['items', 'makeFragment'],
-            signals: []
         });
 
         const host = container.querySelector('section');
@@ -373,8 +396,6 @@ describe('hydrate() marker contract', () => {
     test('resolves signal-backed literal expressions with .get() (ThemeToggle shape)', () => {
         container.innerHTML = '<button data-zx-e="0"></button>';
         const isDark = signal(false);
-        const mangledSignalKey =
-            '___Users_judahsullivan_Personal_zenith_zenith_site_v0_src_components_ui_ThemeToggle_zen_script0_deadbeef_isDark';
 
         hydrate({
             ir_version: 1,
@@ -382,14 +403,16 @@ describe('hydrate() marker contract', () => {
             expressions: [
                 {
                     marker_index: 0,
-                    literal: `${mangledSignalKey}.get() ? "dark" : "light"`
+                    fn_index: 0,
+                    signal_indices: [0]
                 }
             ],
             markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
             events: [],
             state_values: [isDark],
-            state_keys: [mangledSignalKey],
-            signals: []
+            state_keys: ['isDark'],
+            signals: [{ id: 0, kind: 'signal', state_index: 0 }],
+            expr_fns: [({ signalMap }) => (signalMap.get(0).get() ? 'dark' : 'light')]
         });
 
         expect(container.querySelector('button').textContent).toBe('light');
@@ -628,7 +651,7 @@ describe('hydrate() marker contract', () => {
             ir_version: 1,
             root: container,
             expressions: [
-                { marker_index: 0, literal: 'data.model.view === "docs" ? "Docs View" : "Other View"' }
+                { marker_index: 0, fn_index: 0 }
             ],
             markers: [
                 { index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }
@@ -636,6 +659,9 @@ describe('hydrate() marker contract', () => {
             events: [],
             state_values: [],
             signals: [],
+            expr_fns: [
+                ({ ssrData }) => (ssrData.model.view === 'docs' ? 'Docs View' : 'Other View')
+            ],
             ssr_data: {
                 model: {
                     view: 'docs'

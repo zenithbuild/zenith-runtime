@@ -37,14 +37,32 @@ export function zenResize(handler) {
     if (!win || typeof win.addEventListener !== 'function') {
         return () => {};
     }
-    let rafId = null;
-    let lastW = 0;
-    let lastH = 0;
+    const hasRaf =
+        typeof win.requestAnimationFrame === 'function'
+        && typeof win.cancelAnimationFrame === 'function';
+    let scheduledId = null;
+    let lastW = Number.NaN;
+    let lastH = Number.NaN;
+
+    const schedule = (callback) => {
+        if (hasRaf) {
+            return win.requestAnimationFrame(callback);
+        }
+        return win.setTimeout(callback, 0);
+    };
+
+    const cancel = (id) => {
+        if (hasRaf) {
+            win.cancelAnimationFrame(id);
+            return;
+        }
+        win.clearTimeout(id);
+    };
 
     function onResize() {
-        if (rafId !== null) return;
-        rafId = win.requestAnimationFrame(() => {
-            rafId = null;
+        if (scheduledId !== null) return;
+        scheduledId = schedule(() => {
+            scheduledId = null;
             const w = win.innerWidth;
             const h = win.innerHeight;
             if (w !== lastW || h !== lastH) {
@@ -59,9 +77,9 @@ export function zenResize(handler) {
     onResize();
 
     return () => {
-        if (rafId !== null) {
-            win.cancelAnimationFrame(rafId);
-            rafId = null;
+        if (scheduledId !== null) {
+            cancel(scheduledId);
+            scheduledId = null;
         }
         win.removeEventListener('resize', onResize);
     };

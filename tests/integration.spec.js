@@ -108,6 +108,31 @@ describe('hydrate integration contract', () => {
         expect(container.querySelector('span').textContent).toBe('3');
     });
 
+    test('re-renders compiled fn_index expressions when subscribed signals change', () => {
+        container.innerHTML = '<p data-zx-e="0"></p>';
+        const isOpen = runtimeApi.signal(false);
+
+        hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [{
+                marker_index: 0,
+                signal_index: 0,
+                signal_indices: [0],
+                fn_index: 0
+            }],
+            markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
+            events: [],
+            state_values: [isOpen],
+            signals: [{ id: 0, kind: 'signal', state_index: 0 }],
+            expr_fns: [({ signalMap }) => (signalMap.get(0).get() ? 'close' : 'menu')]
+        });
+
+        expect(container.querySelector('p').textContent).toBe('menu');
+        isOpen.set(true);
+        expect(container.querySelector('p').textContent).toBe('close');
+    });
+
     test('keeps static props immutable for component factories', () => {
         container.innerHTML = '<Card data-zx-c="c0"><span data-zx-e="0"></span></Card>';
         let propsFrozen = false;
@@ -637,6 +662,7 @@ describe('hydrate integration contract', () => {
 
     test('_zenhtml rejects script tag injection in interpolated values', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const injection = '<script>alert(1)</script>';
 
         expect(() =>
             hydrate({
@@ -645,20 +671,22 @@ describe('hydrate integration contract', () => {
                 expressions: [
                     {
                         marker_index: 0,
-                        literal: '__ZENITH_INTERNAL_ZENHTML`<div>${injection}</div>`'
+                        fn_index: 0
                     }
                 ],
                 markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
                 events: [],
-                state_values: ['<script>alert(1)</script>'],
-                state_keys: ['injection'],
-                signals: []
+                state_values: [],
+                state_keys: [],
+                signals: [],
+                expr_fns: [({ zenhtml }) => zenhtml`<div>${injection}</div>`]
             })
         ).toThrow(/forbidden.*script/i);
     });
 
     test('_zenhtml rejects javascript: URL injection in interpolated values', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const url = 'javascript:alert(1)';
 
         expect(() =>
             hydrate({
@@ -667,20 +695,22 @@ describe('hydrate integration contract', () => {
                 expressions: [
                     {
                         marker_index: 0,
-                        literal: '__ZENITH_INTERNAL_ZENHTML`<a href="${url}">link</a>`'
+                        fn_index: 0
                     }
                 ],
                 markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
                 events: [],
-                state_values: ['javascript:alert(1)'],
-                state_keys: ['url'],
-                signals: []
+                state_values: [],
+                state_keys: [],
+                signals: [],
+                expr_fns: [({ zenhtml }) => zenhtml`<a href="${url}">link</a>`]
             })
         ).toThrow(/javascript.*URL/i);
     });
 
     test('_zenhtml rejects inline event handler attributes', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const handler = 'alert(1)';
 
         expect(() =>
             hydrate({
@@ -689,20 +719,22 @@ describe('hydrate integration contract', () => {
                 expressions: [
                     {
                         marker_index: 0,
-                        literal: '__ZENITH_INTERNAL_ZENHTML`<div onclick=${handler}>test</div>`'
+                        fn_index: 0
                     }
                 ],
                 markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
                 events: [],
-                state_values: ['alert(1)'],
-                state_keys: ['handler'],
-                signals: []
+                state_values: [],
+                state_keys: [],
+                signals: [],
+                expr_fns: [({ zenhtml }) => zenhtml`<div onclick=${handler}>test</div>`]
             })
         ).toThrow(/event handler.*on\*/i);
     });
 
     test('_zenhtml rejects non-renderable object interpolation', () => {
         container.innerHTML = '<section data-zx-e="0"></section>';
+        const obj = { foo: 'bar' };
 
         expect(() =>
             hydrate({
@@ -711,14 +743,15 @@ describe('hydrate integration contract', () => {
                 expressions: [
                     {
                         marker_index: 0,
-                        literal: '__ZENITH_INTERNAL_ZENHTML`<div>${obj}</div>`'
+                        fn_index: 0
                     }
                 ],
                 markers: [{ index: 0, kind: 'text', selector: '[data-zx-e~="0"]' }],
                 events: [],
-                state_values: [{ foo: 'bar' }],
-                state_keys: ['obj'],
-                signals: []
+                state_values: [],
+                state_keys: [],
+                signals: [],
+                expr_fns: [({ zenhtml }) => zenhtml`<div>${obj}</div>`]
             })
         ).toThrow(/non-renderable object/i);
     });
@@ -774,6 +807,7 @@ describe('runtime source guardrails', () => {
             const source = fs.readFileSync(path.join(srcDir, files[i]), 'utf8');
             expect(source.includes('eval(')).toBe(false);
             expect(source.includes('new Function')).toBe(false);
+            expect(/\bFunction\(/.test(source)).toBe(false);
             expect(source.includes('process.env')).toBe(false);
         }
     });

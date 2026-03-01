@@ -32,8 +32,6 @@ const BOOLEAN_ATTRIBUTES = new Set([
 const STRICT_MEMBER_CHAIN_LITERAL_RE = /^(?:true|false|null|undefined|[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*)$/;
 const UNSAFE_MEMBER_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
-const COMPILED_LITERAL_CACHE = new Map();
-
 /**
  * Hydrate a pre-rendered DOM tree using explicit payload tables.
  *
@@ -69,7 +67,8 @@ export function hydrate(payload) {
             route,
             params,
             ssrData,
-            props
+            props,
+            exprFns
         } = normalized;
 
         const componentBindings = Object.create(null);
@@ -181,7 +180,8 @@ export function hydrate(payload) {
                 params,
                 ssrData,
                 marker.kind,
-                props
+                props,
+                exprFns
             );
             _applyMarkerValue(nodes, marker, value);
         }
@@ -208,7 +208,8 @@ export function hydrate(payload) {
                 params,
                 ssrData,
                 marker.kind,
-                props
+                props,
+                exprFns
             );
             _applyMarkerValue(nodes, marker, value);
         }
@@ -216,13 +217,17 @@ export function hydrate(payload) {
         const dependentMarkersBySignal = new Map();
         for (let i = 0; i < expressions.length; i++) {
             const expression = expressions[i];
-            if (!Number.isInteger(expression.signal_index)) {
+            const signalIndices = _resolveExpressionSignalIndices(expression);
+            if (signalIndices.length === 0) {
                 continue;
             }
-            if (!dependentMarkersBySignal.has(expression.signal_index)) {
-                dependentMarkersBySignal.set(expression.signal_index, []);
+            for (let j = 0; j < signalIndices.length; j++) {
+                const signalIndex = signalIndices[j];
+                if (!dependentMarkersBySignal.has(signalIndex)) {
+                    dependentMarkersBySignal.set(signalIndex, []);
+                }
+                dependentMarkersBySignal.get(signalIndex).push(expression.marker_index);
             }
-            dependentMarkersBySignal.get(expression.signal_index).push(expression.marker_index);
         }
 
         for (const [signalId, markerIndexes] of dependentMarkersBySignal.entries()) {
@@ -295,7 +300,9 @@ export function hydrate(payload) {
                 componentBindings,
                 params,
                 ssrData,
-                'event'
+                'event',
+                props || {},
+                exprFns
             );
             if (typeof handler !== 'function') {
                 throwZenithRuntimeError({
@@ -456,6 +463,7 @@ function _validatePayload(payload) {
     const ssrData = payload.ssr_data && typeof payload.ssr_data === 'object'
         ? payload.ssr_data
         : {};
+    const exprFns = Array.isArray(payload.expr_fns) ? payload.expr_fns : [];
 
     if (markers.length !== expressions.length) {
         throw new Error(
@@ -475,6 +483,23 @@ function _validatePayload(payload) {
             throw new Error(
                 `[Zenith Runtime] expression table out of order at position ${i}: marker_index=${expression.marker_index}`
             );
+        }
+        if (expression.fn_index !== undefined && expression.fn_index !== null) {
+            if (!Number.isInteger(expression.fn_index) || expression.fn_index < 0) {
+                throw new Error(`[Zenith Runtime] expression at position ${i} has invalid fn_index`);
+            }
+        }
+        if (expression.signal_indices !== undefined) {
+            if (!Array.isArray(expression.signal_indices)) {
+                throw new Error(`[Zenith Runtime] expression at position ${i} must provide signal_indices[]`);
+            }
+            for (let j = 0; j < expression.signal_indices.length; j++) {
+                if (!Number.isInteger(expression.signal_indices[j]) || expression.signal_indices[j] < 0) {
+                    throw new Error(
+                        `[Zenith Runtime] expression at position ${i} has invalid signal_indices[${j}]`
+                    );
+                }
+            }
         }
     }
 
@@ -638,7 +663,8 @@ function _validatePayload(payload) {
         route,
         params: Object.freeze(params),
         ssrData: Object.freeze(ssrData),
-        props: Object.freeze(props)
+        props: Object.freeze(props),
+        exprFns: Object.freeze(exprFns)
     };
 
     return Object.freeze(validatedPayload);
@@ -702,7 +728,34 @@ function _resolveNodes(root, selector, index, kind) {
     return nodes;
 }
 
-function _evaluateExpression(binding, stateValues, stateKeys, signalMap, componentBindings, params, ssrData, mode, props) {
+function _resolveExpressionSignalIndices(binding) {
+    if (!binding || typeof binding !== 'object') {
+        return [];
+    }
+    if (Array.isArray(binding.signal_indices) && binding.signal_indices.length > 0) {
+        return [...new Set(binding.signal_indices.filter((value) => Number.isInteger(value) && value >= 0))];
+    }
+    if (Number.isInteger(binding.signal_index) && binding.signal_index >= 0) {
+        return [binding.signal_index];
+    }
+    return [];
+}
+
+function _evaluateExpression(binding, stateValues, stateKeys, signalMap, componentBindings, params, ssrData, mode, props, exprFns) {
+    if (binding.fn_index != null && binding.fn_index !== undefined) {
+        const fns = Array.isArray(exprFns) ? exprFns : [];
+        const fn = fns[binding.fn_index];
+        if (typeof fn === 'function') {
+            return fn({
+                signalMap,
+                params,
+                ssrData,
+                props: props || {},
+                componentBindings,
+                zenhtml: _zenhtml
+            });
+        }
+    }
     if (binding.signal_index !== null && binding.signal_index !== undefined) {
         const signalValue = signalMap.get(binding.signal_index);
         if (!signalValue || typeof signalValue.get !== 'function') {
@@ -773,17 +826,9 @@ function _evaluateExpression(binding, stateValues, stateKeys, signalMap, compone
                 return props || {};
             }
 
-            const evaluated = _evaluateLiteralExpression(
-                trimmedLiteral,
-                stateValues,
-                stateKeys,
-                params,
-                ssrData,
-                mode,
-                props
-            );
-            if (evaluated !== UNRESOLVED_LITERAL) {
-                return evaluated;
+            const primitiveValue = _resolvePrimitiveLiteral(trimmedLiteral);
+            if (primitiveValue !== UNRESOLVED_LITERAL) {
+                return primitiveValue;
             }
             if (_isLikelyExpressionLiteral(trimmedLiteral)) {
                 throwZenithRuntimeError({
@@ -906,33 +951,39 @@ function _resolveStrictMemberChainLiteral(
     return cursor;
 }
 
-function _evaluateLiteralExpression(expression, stateValues, stateKeys, params, ssrData, mode, props) {
-    const scope = _buildLiteralScope(stateValues, stateKeys, params, ssrData, mode, props);
-    const scopeKeys = Object.keys(scope);
-    const scopeValues = scopeKeys.map((key) => scope[key]);
-    const rewritten = _rewriteMarkupLiterals(expression);
-    const cacheKey = `${scopeKeys.join('|')}::${rewritten}`;
-
-    let evaluator = COMPILED_LITERAL_CACHE.get(cacheKey);
-    if (!evaluator) {
-        try {
-            evaluator = Function(
-                ...scopeKeys,
-                `return (${rewritten});`
-            );
-        } catch (err) {
-            if (isZenithRuntimeError(err)) throw err;
-            return UNRESOLVED_LITERAL;
-        }
-        COMPILED_LITERAL_CACHE.set(cacheKey, evaluator);
-    }
-
-    try {
-        return evaluator(...scopeValues);
-    } catch (err) {
-        if (isZenithRuntimeError(err)) throw err;
+function _resolvePrimitiveLiteral(literal) {
+    if (typeof literal !== 'string') {
         return UNRESOLVED_LITERAL;
     }
+    if (literal === 'true') return true;
+    if (literal === 'false') return false;
+    if (literal === 'null') return null;
+    if (literal === 'undefined') return undefined;
+
+    if (/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(literal)) {
+        return Number(literal);
+    }
+
+    if (literal.length >= 2 && literal.startsWith('"') && literal.endsWith('"')) {
+        try {
+            return JSON.parse(literal);
+        } catch {
+            return UNRESOLVED_LITERAL;
+        }
+    }
+
+    if (literal.length >= 2 && literal.startsWith('\'') && literal.endsWith('\'')) {
+        return literal
+            .slice(1, -1)
+            .replace(/\\\\/g, '\\')
+            .replace(/\\'/g, '\'');
+    }
+
+    if (literal.length >= 2 && literal.startsWith('`') && literal.endsWith('`')) {
+        return literal.slice(1, -1);
+    }
+
+    return UNRESOLVED_LITERAL;
 }
 
 function _buildLiteralScope(stateValues, stateKeys, params, ssrData, mode, props) {
