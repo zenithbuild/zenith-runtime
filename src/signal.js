@@ -15,6 +15,7 @@
 //   - No scheduler
 //   - No async queue
 // ---------------------------------------------------------------------------
+import { _nextReactiveId, _trackDependency } from './zeneffect.js';
 
 /**
  * Create a deterministic signal with explicit subscription semantics.
@@ -25,9 +26,12 @@
 export function signal(initialValue) {
     let value = initialValue;
     const subscribers = new Set();
+    const reactiveId = _nextReactiveId();
 
     return {
+        __zenith_id: reactiveId,
         get() {
+            _trackDependency(this);
             return value;
         },
         set(nextValue) {

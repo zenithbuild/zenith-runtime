@@ -37,9 +37,12 @@ function cloneSnapshot(value) {
 export function state(initialValue) {
     let current = Object.freeze(cloneSnapshot(initialValue));
     const subscribers = new Set();
+    const reactiveId = _nextReactiveId();
 
     return {
+        __zenith_id: reactiveId,
         get() {
+            _trackDependency(this);
             return current;
         },
         set(nextPatch) {

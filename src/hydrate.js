@@ -13,6 +13,7 @@ import { signal } from './signal.js';
 import { state } from './state.js';
 import {
     zeneffect,
+    zenEffect,
     zenMount,
     createSideEffectScope,
     activateSideEffectScope,
@@ -752,7 +753,13 @@ function _evaluateExpression(binding, stateValues, stateKeys, signalMap, compone
                 ssrData,
                 props: props || {},
                 componentBindings,
-                zenhtml: _zenhtml
+                zenhtml: _zenhtml,
+                fragment(html) {
+                    return {
+                        __zenith_fragment: true,
+                        html: html === null || html === undefined || html === false ? '' : String(html)
+                    };
+                }
             });
         }
     }

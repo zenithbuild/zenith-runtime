@@ -133,6 +133,48 @@ describe('hydrate integration contract', () => {
         expect(container.querySelector('p').textContent).toBe('close');
     });
 
+    test('zenEffect re-runs on signal changes and updates visible dom state', async () => {
+        container.innerHTML = '<Card data-zx-c="c0"><span data-status>idle</span></Card>';
+        const isOpen = runtimeApi.signal(false);
+        let effectRuns = 0;
+
+        hydrate({
+            ir_version: 1,
+            root: container,
+            expressions: [],
+            markers: [],
+            events: [],
+            state_values: [isOpen],
+            signals: [{ id: 0, kind: 'signal', state_index: 0 }],
+            components: [{
+                instance: 'c0',
+                selector: '[data-zx-c~="c0"]',
+                props: [{ name: 'isOpen', type: 'signal', index: 0 }],
+                create: (host, props, runtime) => ({
+                    mount() {
+                        const status = host.querySelector('[data-status]');
+                        runtime.zenEffect(() => {
+                            effectRuns += 1;
+                            status.textContent = props.isOpen.get() ? 'close' : 'menu';
+                        });
+                    },
+                    destroy() { },
+                    bindings: Object.freeze({})
+                })
+            }]
+        });
+
+        await Promise.resolve();
+        expect(container.querySelector('[data-status]').textContent).toBe('menu');
+        expect(effectRuns).toBe(1);
+
+        isOpen.set(true);
+
+        await Promise.resolve();
+        expect(container.querySelector('[data-status]').textContent).toBe('close');
+        expect(effectRuns).toBe(2);
+    });
+
     test('keeps static props immutable for component factories', () => {
         container.innerHTML = '<Card data-zx-c="c0"><span data-zx-e="0"></span></Card>';
         let propsFrozen = false;
