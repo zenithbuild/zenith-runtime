@@ -1,3 +1,9 @@
+> **Moved:** Zenith core development now lives in **zenithbuild/framework**.
+>
+> New home: https://github.com/zenithbuild/framework/tree/master/packages/runtime
+>
+> This repository is archived and kept read-only for history.
+
 # @zenith/runtime
 
 > **⚠️ Internal API:** This package is an internal implementation detail of the Zenith framework. It is not intended for public use and its API may break without warning. Please use `@zenithbuild/core` instead.
